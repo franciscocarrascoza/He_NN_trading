@@ -26,37 +26,12 @@ class BinanceDataFetcher:
         """Return the most recent historical candles as a DataFrame."""
 
         limit = limit or self.config.history_limit
-        max_batch = self.config.max_klines_per_request
-        remaining = limit
-        end_time: Optional[int] = None
-        batches: List[List[List]] = []
-
-        while remaining > 0:
-            batch_limit = min(max_batch, remaining)
-            params = {
-                "symbol": self.config.symbol,
-                "interval": self.config.interval,
-                "limit": batch_limit,
-            }
-            if end_time is not None:
-                params["endTime"] = end_time
-
-            raw_batch: List[List] = self._get("/fapi/v1/klines", params=params)
-            if not raw_batch:
-                break
-
-            batches.append(raw_batch)
-            remaining -= len(raw_batch)
-            first_open_time = int(raw_batch[0][0])
-            end_time = first_open_time - 1
-
-            if len(raw_batch) < batch_limit:
-                break
-
-        raw_klines: List[List] = [kline for batch in reversed(batches) for kline in batch]
-        if len(raw_klines) > limit:
-            raw_klines = raw_klines[-limit:]
-
+        params = {
+            "symbol": self.config.symbol,
+            "interval": self.config.interval,
+            "limit": limit,
+        }
+        raw_klines: List[List] = self._get("/fapi/v1/klines", params=params)
         columns = [
             "open_time",
             "open",
@@ -76,7 +51,6 @@ class BinanceDataFetcher:
         df[numeric_columns] = df[numeric_columns].astype(float)
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-        df = df.sort_values("open_time").reset_index(drop=True)
         return df
 
     def get_order_book(self, depth: Optional[int] = None) -> Dict[str, List[Tuple[float, float]]]:

@@ -85,7 +85,7 @@ python main.py
 
 The script will:
 
-1. Download the latest 3,000 hourly BTCUSDT futures candles from Binance. The client automatically paginates requests to respect Binance's 1,500-candle REST limit.
+1. Download the latest 3,000 hourly BTCUSDT futures candles from Binance.
 2. Build the liquidity-map and order-book feature sets.
 3. Assemble a sliding-window dataset, split it into training/validation subsets, and train the Hermite neural network.
 4. Print the predicted price for the next hourly close.

@@ -31,14 +31,10 @@ class HermiteDataset(Dataset):
         required_cols = ["open", "high", "low", "close", "volume"]
         self.feature_window = feature_window
         self.forecast_horizon = forecast_horizon
-        self.candles = candles.copy()
         values = candles[required_cols].to_numpy(dtype=np.float32)
-        feature_vectors: List[np.ndarray] = []
-        targets: List[float] = []
-        anchor_prices: List[float] = []
-        future_prices: List[float] = []
-        anchor_times: List[pd.Timestamp] = []
-        future_times: List[pd.Timestamp] = []
+        feature_vectors = []
+        targets = []
+        anchor_prices = []
 
         liquidity_vector = np.array(list(liquidity_features.values()), dtype=np.float32)
         orderbook_vector = np.array(list(orderbook_features.values()), dtype=np.float32)
@@ -54,23 +50,11 @@ class HermiteDataset(Dataset):
             features = np.concatenate([window_features, extra_features])
             feature_vectors.append(features)
             anchor_prices.append(current_close)
-            future_prices.append(future_close)
             targets.append(np.log(future_close / current_close))
-            anchor_times.append(pd.to_datetime(candles["close_time"].iloc[end - 1]))
-            future_times.append(pd.to_datetime(candles["close_time"].iloc[end + forecast_horizon - 1]))
-
-        if not feature_vectors:
-            raise ValueError(
-                "Not enough candle history for the requested feature window and forecast horizon. "
-                "Reduce `feature_window` or `forecast_horizon`."
-            )
 
         self.features = np.vstack(feature_vectors).astype(np.float32)
         self.targets = np.array(targets, dtype=np.float32)[:, None]
         self.anchor_prices = np.array(anchor_prices, dtype=np.float32)
-        self.future_prices = np.array(future_prices, dtype=np.float32)
-        self.anchor_times = pd.to_datetime(anchor_times)
-        self.future_times = pd.to_datetime(future_times)
 
         if normalise:
             self.feature_mean = self.features.mean(axis=0)
@@ -83,7 +67,6 @@ class HermiteDataset(Dataset):
         self.features = torch.from_numpy(self.features)
         self.targets = torch.from_numpy(self.targets)
         self.anchor_prices = torch.from_numpy(self.anchor_prices)
-        self.future_prices = torch.from_numpy(self.future_prices)
 
     def __len__(self) -> int:
         return self.features.shape[0]
@@ -105,7 +88,6 @@ class TrainingArtifacts:
     training_losses: List[float]
     validation_losses: List[float]
     device: torch.device
-    forecast_frame: pd.DataFrame
 
 
 class HermiteTrainer:
@@ -217,8 +199,6 @@ class HermiteTrainer:
             )
             model.train()
 
-        forecast_frame = self._build_forecast_frame(model, dataset)
-
         return TrainingArtifacts(
             model=model,
             dataset=dataset,
@@ -227,7 +207,6 @@ class HermiteTrainer:
             training_losses=train_losses,
             validation_losses=val_losses,
             device=self.device,
-            forecast_frame=forecast_frame,
         )
 
     def predict_next_price(self, artifacts: TrainingArtifacts) -> float:
@@ -238,37 +217,6 @@ class HermiteTrainer:
             predicted_log_return = artifacts.model(last_features).item()
         last_price = dataset.anchor_prices[-1].item()
         return float(last_price * np.exp(predicted_log_return))
-
-    def _build_forecast_frame(
-        self, model: HermiteForecaster, dataset: HermiteDataset
-    ) -> pd.DataFrame:
-        loader = DataLoader(dataset, batch_size=self.training_config.batch_size, shuffle=False)
-        model.eval()
-        predictions: List[torch.Tensor] = []
-        with torch.no_grad():
-            for batch_features, _ in loader:
-                batch_features = batch_features.to(self.device)
-                batch_preds = model(batch_features).squeeze(-1).detach().cpu()
-                predictions.append(batch_preds)
-
-        if not predictions:
-            raise ValueError("Unable to compute forecasts because the dataset is empty.")
-
-        predicted_log_returns = torch.cat(predictions).numpy()
-        anchor_prices = dataset.anchor_prices.numpy()
-        predicted_prices = anchor_prices * np.exp(predicted_log_returns)
-        actual_prices = dataset.future_prices.numpy()
-
-        frame = pd.DataFrame(
-            {
-                "anchor_time": dataset.anchor_times,
-                "target_time": dataset.future_times,
-                "anchor_price": anchor_prices,
-                "actual_price": actual_prices,
-                "predicted_price": predicted_prices,
-            }
-        )
-        return frame
 
 
 __all__ = [
