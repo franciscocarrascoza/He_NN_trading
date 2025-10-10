@@ -8,7 +8,7 @@ class BinanceAPIConfig:
 
     symbol: str = "BTCUSDT"
     interval: str = "1h"
-    history_limit: int = 3000
+    history_limit: int = 1500
     futures_base_url: str = "https://fapi.binance.com"
     spot_base_url: str = "https://api.binance.com"
     order_book_limit: int = 100
@@ -25,7 +25,7 @@ class FeatureConfig:
     liquidity_price_range: float = 0.6
     liquidity_smoothing_sigma: float = 5.0
     liquidity_top_k: int = 10
-    order_book_depth: int = 25
+    order_book_depth: int = 20
 
 
 @dataclass(frozen=True)
