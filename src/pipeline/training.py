@@ -31,10 +31,12 @@ class HermiteDataset(Dataset):
         required_cols = ["open", "high", "low", "close", "volume"]
         self.feature_window = feature_window
         self.forecast_horizon = forecast_horizon
-        values = candles[required_cols].to_numpy(dtype=np.float32)
+        self.candles = candles.reset_index(drop=True).copy()
+        values = self.candles[required_cols].to_numpy(dtype=np.float32)
         feature_vectors = []
         targets = []
         anchor_prices = []
+        target_times = []
 
         liquidity_vector = np.array(list(liquidity_features.values()), dtype=np.float32)
         orderbook_vector = np.array(list(orderbook_features.values()), dtype=np.float32)
@@ -45,16 +47,19 @@ class HermiteDataset(Dataset):
         for end in range(feature_window, max_index):
             window = values[end - feature_window : end]
             current_close = values[end - 1, 3]
-            future_close = values[end + forecast_horizon - 1, 3]
+            future_index = end + forecast_horizon - 1
+            future_close = values[future_index, 3]
             window_features = window.flatten()
             features = np.concatenate([window_features, extra_features])
             feature_vectors.append(features)
             anchor_prices.append(current_close)
             targets.append(np.log(future_close / current_close))
+            target_times.append(self.candles.iloc[future_index]["close_time"])
 
         self.features = np.vstack(feature_vectors).astype(np.float32)
         self.targets = np.array(targets, dtype=np.float32)[:, None]
         self.anchor_prices = np.array(anchor_prices, dtype=np.float32)
+        self.target_times = pd.Series(target_times, name="target_time")
 
         if normalise:
             self.feature_mean = self.features.mean(axis=0)
@@ -88,6 +93,7 @@ class TrainingArtifacts:
     training_losses: List[float]
     validation_losses: List[float]
     device: torch.device
+    forecast_frame: pd.DataFrame
 
 
 class HermiteTrainer:
@@ -199,6 +205,23 @@ class HermiteTrainer:
             )
             model.train()
 
+        model.eval()
+        with torch.no_grad():
+            full_features = dataset.features.to(self.device)
+            predicted_log_returns = model(full_features).squeeze(1).cpu().numpy()
+
+        anchor_prices = dataset.anchor_prices.cpu().numpy()
+        actual_log_returns = dataset.targets.squeeze(1).cpu().numpy()
+        predicted_prices = anchor_prices * np.exp(predicted_log_returns)
+        actual_prices = anchor_prices * np.exp(actual_log_returns)
+        forecast_frame = pd.DataFrame(
+            {
+                "target_time": dataset.target_times,
+                "actual_price": actual_prices,
+                "predicted_price": predicted_prices,
+            }
+        )
+
         return TrainingArtifacts(
             model=model,
             dataset=dataset,
@@ -207,6 +230,7 @@ class HermiteTrainer:
             training_losses=train_losses,
             validation_losses=val_losses,
             device=self.device,
+            forecast_frame=forecast_frame,
         )
 
     def predict_next_price(self, artifacts: TrainingArtifacts) -> float:
