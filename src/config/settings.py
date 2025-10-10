@@ -9,6 +9,7 @@ class BinanceAPIConfig:
     symbol: str = "BTCUSDT"
     interval: str = "1h"
     history_limit: int = 1500
+    max_klines_per_request: int = 1500
     futures_base_url: str = "https://fapi.binance.com"
     spot_base_url: str = "https://api.binance.com"
     order_book_limit: int = 100

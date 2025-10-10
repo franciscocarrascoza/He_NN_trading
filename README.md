@@ -37,7 +37,7 @@ conda create -n hermite-nn python=3.10 -y
 conda activate hermite-nn
 # Install PyTorch with CUDA support (includes drivers for RTX 2060-class GPUs)
 conda install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia -y
-conda install numpy pandas requests scipy -y
+conda install numpy pandas requests scipy plotly streamlit -y
 ```
 
 If you already maintain a CUDA-enabled PyTorch installation, you only need to ensure that the environment exposes the `torch` package compiled with GPU support.
@@ -45,10 +45,35 @@ If you already maintain a CUDA-enabled PyTorch installation, you only need to en
 ### pip workflow
 
 ```bash
-pip install numpy pandas requests scipy torch --extra-index-url https://download.pytorch.org/whl/cu118
+pip install numpy pandas requests scipy torch plotly streamlit --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
 The `--extra-index-url` flag fetches the GPU-enabled wheels (compatible with RTX 2060) from the official PyTorch repository.
+
+### Troubleshooting PyTorch import errors
+
+If importing PyTorch fails with an error similar to:
+
+```
+ImportError: .../libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
+```
+
+the environment is missing Intel's JIT profiling symbols that ship with the
+`intel-openmp` runtime. This typically occurs when a conda environment upgrades
+`torch` without pulling the matching OpenMP dependency, leaving an older
+`libiomp5.so` on the search path. Fix the issue by reinstalling the Intel
+runtime in the active environment:
+
+```bash
+conda install intel-openmp -y
+# or, if you prefer conda-forge packages
+conda install -c conda-forge libiomp -y
+```
+
+After reinstalling, restart the shell so the loader picks up the refreshed
+library. Alternatively, reinstalling PyTorch with matching channels (e.g.
+`conda install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia -y`) brings the
+correct dependency set back in place.
 
 ## Usage
 
@@ -72,6 +97,16 @@ python main.py --save artifacts.pt
 ```
 
 The saved payload contains the model parameters alongside feature normalisation statistics for reproducible deployment.
+
+### Interactive control panel
+
+To manipulate data-source parameters, training hyper-parameters, and plot the historical vs. predicted prices, launch the Streamlit interface:
+
+```bash
+streamlit run src/interface/app.py
+```
+
+The left-hand panel exposes Binance symbol, interval, look-back size, and Hermite NN hyper-parameters. Set the forecast horizon slider to any integer between 1 and 15 hours to control how far ahead the network predicts. After clicking **Start training**, the right-hand side renders the loss curves together with historical candles, observed futures closes, and the model's forecasts.
 
 ## Training and validation process
 

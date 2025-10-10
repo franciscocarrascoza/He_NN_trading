@@ -1,22 +1,69 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import torch
 
+from src.config import BINANCE, TRAINING, BinanceAPIConfig, TrainingConfig
+from src.data import BinanceDataFetcher
 from src.pipeline import HermiteTrainer
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Hermite NN forecaster for BTCUSDT")
     parser.add_argument("--save", type=Path, default=None, help="Optional path to save the trained model state.")
+    parser.add_argument("--symbol", type=str, default=None, help="Override the Binance trading pair symbol (e.g. BTCUSDT).")
+    parser.add_argument("--interval", type=str, default=None, help="Override the Binance kline interval (e.g. 1h).")
+    parser.add_argument("--history-limit", type=int, default=None, help="Number of historical candles to download (<=5000).")
+    parser.add_argument(
+        "--forecast-horizon",
+        type=int,
+        default=None,
+        help="Number of candles ahead to predict (1-15).",
+    )
+    parser.add_argument("--batch-size", type=int, default=None, help="Mini-batch size for training.")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate for the optimiser.")
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs.")
+    parser.add_argument(
+        "--device-preference",
+        type=str,
+        default=None,
+        help="Preferred CUDA device name substring (e.g. RTX 2060).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    trainer = HermiteTrainer()
+    binance_config: BinanceAPIConfig = BINANCE
+    training_config: TrainingConfig = TRAINING
+
+    if any(value is not None for value in (args.symbol, args.interval, args.history_limit)):
+        binance_config = replace(
+            binance_config,
+            symbol=args.symbol or binance_config.symbol,
+            interval=args.interval or binance_config.interval,
+            history_limit=args.history_limit or binance_config.history_limit,
+        )
+
+    if args.forecast_horizon is not None:
+        if not 1 <= args.forecast_horizon <= 15:
+            raise ValueError("--forecast-horizon must be between 1 and 15 inclusive.")
+        training_config = replace(training_config, forecast_horizon=args.forecast_horizon)
+
+    if args.batch_size is not None:
+        training_config = replace(training_config, batch_size=args.batch_size)
+    if args.learning_rate is not None:
+        training_config = replace(training_config, learning_rate=args.learning_rate)
+    if args.epochs is not None:
+        training_config = replace(training_config, num_epochs=args.epochs)
+    if args.device_preference is not None:
+        training_config = replace(training_config, device_preference=args.device_preference)
+
+    fetcher = BinanceDataFetcher(binance_config)
+    trainer = HermiteTrainer(fetcher, training_config=training_config)
     artifacts = trainer.train()
     print(f"Training device: {artifacts.device}")
     if artifacts.training_losses:
