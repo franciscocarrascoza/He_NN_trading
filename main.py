@@ -13,7 +13,12 @@ from src.pipeline import HermiteTrainer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Hermite NN forecaster for BTCUSDT")
-    parser.add_argument("--save", type=Path, default=None, help="Optional path to save the trained model state.")
+    parser.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="Optional path to save the training checkpoint (overrides config).",
+    )
     parser.add_argument("--symbol", type=str, default=None, help="Override the Binance trading pair symbol (e.g. BTCUSDT).")
     parser.add_argument("--interval", type=str, default=None, help="Override the Binance kline interval (e.g. 1h).")
     parser.add_argument("--history-limit", type=int, default=None, help="Number of historical candles to download (<=5000).")
@@ -62,28 +67,30 @@ def main() -> None:
     if args.device_preference is not None:
         training_config = replace(training_config, device_preference=args.device_preference)
 
+    if args.save is not None:
+        training_config = replace(training_config, checkpoint_path=str(args.save))
+
     fetcher = BinanceDataFetcher(binance_config)
     trainer = HermiteTrainer(fetcher, training_config=training_config)
     artifacts = trainer.train()
     print(f"Training device: {artifacts.device}")
     if artifacts.training_losses:
         print(
-            f"Final losses -> Train: {artifacts.training_losses[-1]:.6f}, "
+            f"Final Huber losses -> Train: {artifacts.training_losses[-1]:.6f}, "
             f"Validation: {artifacts.validation_losses[-1]:.6f}"
         )
+    metrics = artifacts.price_metrics
+    print(
+        "Validation price metrics -> "
+        f"MAE: {metrics.mae:.6f}, RMSE: {metrics.rmse:.6f}, MAPE: {metrics.mape:.4f}% "
+        f"Median APE: {metrics.median_ape:.4f}%"
+    )
+    print(
+        f"Average absolute error (last 10 val predictions): {metrics.avg_abs_err_last_10:.6f}"
+    )
+    print(f"Checkpoint stored at: {artifacts.checkpoint_path}")
     next_price = trainer.predict_next_price(artifacts)
     print(f"Predicted next price: {next_price:.2f} USDT")
-    if args.save:
-        payload = {
-            "model_state": artifacts.model.state_dict(),
-            "feature_mean": artifacts.feature_mean,
-            "feature_std": artifacts.feature_std,
-            "training_losses": artifacts.training_losses,
-            "validation_losses": artifacts.validation_losses,
-            "device": str(artifacts.device),
-        }
-        torch.save(payload, args.save)
-        print(f"Artifacts saved to {args.save}")
 
 
 if __name__ == "__main__":
