@@ -11,17 +11,21 @@ This project provides a modular pipeline to forecast the next Bitcoin hourly pri
 ```
 .
 ├── main.py                   # Command line entry-point
+├── inference.py              # Standalone checkpoint inference helper
 ├── src/
 │   ├── __init__.py
 │   ├── config/               # Centralised configuration dataclasses
 │   │   └── settings.py
 │   ├── data/                 # Binance REST client
-│   │   └── binance_fetcher.py
+│   │   ├── binance_fetcher.py
+│   │   └── dataset.py        # Causal sliding-window dataset
 │   ├── features/             # Feature engineering modules
 │   │   ├── liquidity.py
 │   │   └── orderbook.py
 │   ├── models/               # Hermite neural network definition
 │   │   └── hermite.py
+│   ├── eval/                 # Offline evaluation helpers
+│   │   └── evaluate.py
 │   └── pipeline/             # Training utilities
 │       └── training.py
 ```
@@ -90,13 +94,10 @@ The script will:
 3. Assemble a sliding-window dataset, split it into training/validation subsets, and train the Hermite neural network.
 4. Print the predicted price for the next hourly close.
 
-Optionally save the trained artifacts for later inference:
-
-```bash
-python main.py --save artifacts.pt
-```
-
-The saved payload contains the model parameters alongside feature normalisation statistics for reproducible deployment.
+The pipeline automatically stores a reproducible checkpoint under
+`artifacts/hermite_forecaster.pt` (configurable via `--save`). The checkpoint
+includes the model weights, optimiser state, feature list, train-only scaler
+statistics, and the train/validation timestamp ranges.
 
 ### Interactive control panel
 
@@ -106,16 +107,65 @@ To manipulate data-source parameters, training hyper-parameters, and plot the hi
 streamlit run src/interface/app.py
 ```
 
-The left-hand panel exposes Binance symbol, interval, look-back size, and Hermite NN hyper-parameters. Set the forecast horizon slider to any integer between 1 and 15 hours to control how far ahead the network predicts. After clicking **Start training**, the right-hand side renders the loss curves together with historical candles, observed futures closes, and the model's forecasts.
+The left-hand panel exposes Binance symbol, interval, look-back size, and
+Hermite NN hyper-parameters. Set the forecast horizon slider to any integer
+between 1 and 15 hours to control how far ahead the network predicts. After
+clicking **Start training**, the right-hand side renders the loss curves
+together with historical candles, observed futures closes, the model's
+forecasts, and the running average absolute error across the last ten
+validation predictions (also displayed directly on the chart).
 
 ## Training and validation process
 
 The pipeline trains through `src/pipeline/training.py` and follows these steps:
 
-1. **Dataset preparation** – combines normalised OHLCV windows with liquidity/order-book features and produces log-return targets.
-2. **Deterministic split** – shuffles the dataset with a fixed seed and reserves 20% for validation (configurable via `TrainingConfig.validation_split`).
-3. **GPU-aware execution** – automatically selects an NVIDIA RTX 2060 if present (`TrainingConfig.device_preference`). When unavailable, it falls back to the next CUDA device or CPU.
-4. **Loss tracking** – optimises with Adam while recording mean-squared-error losses for both training and validation sets each epoch. These metrics are printed to stdout and saved with the artifacts for later inspection.
+1. **Dataset preparation** – constructs causal OHLCV windows and appends
+   liquidity/order-book summaries without performing any in-place
+   normalisation.
+2. **Chronological split** – keeps the earliest samples for training and
+   reserves the last `validation_split` fraction for validation. The train/val
+   timestamp ranges are printed to stdout for every run.
+3. **GPU-aware execution** – automatically selects an NVIDIA RTX 2060 if
+   present (`TrainingConfig.device_preference`). When unavailable, it falls
+   back to the next CUDA device or CPU.
+4. **Robust optimisation** – trains with the Huber loss (`delta=1e-3`) and
+   clips gradients to `max_norm=1.0` for stability.
+5. **Price-space validation** – after each epoch, reports the validation Huber
+   loss, and after training computes MAE, RMSE, MAPE, median APE, and the mean
+   absolute error over the last 10 validation predictions in price units.
+
+Example console snippet:
+
+```
+Setting deterministic seed: 42
+Train period: 2023-01-01T00:00:00+00:00 -> 2023-04-01T23:00:00+00:00 (1672531200000 -> 1680390000000)
+Validation period: 2023-04-02T00:00:00+00:00 -> 2023-04-30T23:00:00+00:00 (1680393600000 -> 1682895600000)
+Epoch 1/10 - Train Huber: 0.00001234 - Val Huber: 0.00002157
+...
+Validation price metrics -> MAE: 15.238401, RMSE: 22.719076, MAPE: 0.4123% , Median APE: 0.3011%, Avg abs err last 10: 11.904200
+Checkpoint saved to artifacts/hermite_forecaster.pt
+```
+
+These metrics are mirrored in the Streamlit dashboard and stored with the
+checkpoint for downstream evaluation.
+
+### Offline evaluation and inference
+
+Use the dedicated scripts to analyse or deploy trained checkpoints:
+
+```bash
+# Evaluate the validation slice recorded in the checkpoint
+python -m src.eval.evaluate artifacts/hermite_forecaster.pt --csv-output reports/val_predictions.csv
+
+# Run inference on your own candle history
+python inference.py --ckpt artifacts/hermite_forecaster.pt --csv path/to/latest_candles.csv
+```
+
+The evaluation utility reloads the saved scalers, reconstructs validation price
+predictions, and prints the MAE/RMSE/MAPE/median APE metrics while optionally
+writing a detailed CSV report. The inference helper expects a CSV with at least
+`open,high,low,close,volume,close_time` columns and outputs both the predicted
+log-return and price at the configured horizon.
 
 ## Extending the project
 
