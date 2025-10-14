@@ -1,3 +1,3 @@
-from .training import HermiteDataset, HermiteTrainer, TrainingArtifacts
+from .training import HermiteTrainer, PriceMetrics, TrainingArtifacts
 
-__all__ = ["HermiteDataset", "HermiteTrainer", "TrainingArtifacts"]
+__all__ = ["HermiteTrainer", "TrainingArtifacts", "PriceMetrics"]

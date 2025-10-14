@@ -46,6 +46,13 @@ class TrainingConfig:
     validation_split: float = 0.2
     random_seed: int = 42
     device_preference: str = "RTX 2060"
+    checkpoint_path: str = "artifacts/hermite_forecaster.pt"
+
+    @property
+    def seed(self) -> int:
+        """Alias for backwards compatibility with legacy ``random_seed`` usages."""
+
+        return self.random_seed
 
 
 BINANCE = BinanceAPIConfig()
