@@ -69,11 +69,18 @@ def _build_training_config(
 def _render_results(trainer: HermiteTrainer, artifacts) -> None:
     forecast_frame = artifacts.forecast_frame
     next_price = trainer.predict_next_price(artifacts)
+    metrics = artifacts.price_metrics
 
     st.success(
         f"Training complete on device **{artifacts.device}**. "
         f"Next {trainer.training_config.forecast_horizon}-hour price forecast: **{next_price:.2f} USDT**"
     )
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Val MAE", f"{metrics.mae:.4f}")
+    metric_columns[1].metric("Val RMSE", f"{metrics.rmse:.4f}")
+    metric_columns[2].metric("Val MAPE", f"{metrics.mape:.3f}%")
+    metric_columns[3].metric("Median APE", f"{metrics.median_ape:.3f}%")
 
     st.subheader("Loss history")
     loss_columns = st.columns(2)
@@ -95,7 +102,7 @@ def _render_results(trainer: HermiteTrainer, artifacts) -> None:
     fig.add_trace(
         go.Scatter(
             x=forecast_frame["target_time"],
-            y=forecast_frame["actual_price"],
+            y=forecast_frame["true_price"],
             name="Observed Future Close",
             mode="lines",
             line=dict(color="#EF553B"),
@@ -104,11 +111,27 @@ def _render_results(trainer: HermiteTrainer, artifacts) -> None:
     fig.add_trace(
         go.Scatter(
             x=forecast_frame["target_time"],
-            y=forecast_frame["predicted_price"],
+            y=forecast_frame["pred_price"],
             name="Predicted Close",
             mode="lines",
             line=dict(color="#00CC96"),
         )
+    )
+    fig.add_annotation(
+        text=(
+            f"Avg abs err last 10: {metrics.avg_abs_err_last_10:.4f} USDT\n"
+            f"Validation window: {forecast_frame['target_time'].iloc[0]} → "
+            f"{forecast_frame['target_time'].iloc[-1]}"
+        ),
+        xref="paper",
+        yref="paper",
+        x=0.01,
+        y=0.99,
+        showarrow=False,
+        bgcolor="rgba(0, 0, 0, 0.35)",
+        bordercolor="rgba(0,0,0,0)",
+        font=dict(color="white"),
+        align="left",
     )
     fig.update_layout(
         xaxis_title="Timestamp (UTC)",
@@ -117,6 +140,37 @@ def _render_results(trainer: HermiteTrainer, artifacts) -> None:
         margin=dict(l=40, r=20, t=40, b=40),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Validation residuals")
+    residual_fig = go.Figure()
+    residual_fig.add_trace(
+        go.Histogram(x=forecast_frame["pred_price"] - forecast_frame["true_price"], nbinsx=50)
+    )
+    residual_fig.update_layout(
+        xaxis_title="Prediction error (USDT)",
+        yaxis_title="Frequency",
+        bargap=0.05,
+        margin=dict(l=40, r=20, t=40, b=40),
+    )
+    st.plotly_chart(residual_fig, use_container_width=True)
+
+    st.dataframe(
+        forecast_frame[[
+            "target_time",
+            "anchor_price",
+            "true_price",
+            "pred_price",
+            "abs_error",
+            "ape_pct",
+        ]].rename(columns={
+            "target_time": "Target Time",
+            "anchor_price": "Anchor Price",
+            "true_price": "True Price",
+            "pred_price": "Predicted Price",
+            "abs_error": "Absolute Error",
+            "ape_pct": "APE %",
+        })
+    )
 
 
 def run_app() -> None:
