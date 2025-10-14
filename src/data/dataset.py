@@ -82,18 +82,7 @@ class HermiteDataset(Dataset):
             raise ValueError("candles must be sorted by close_time in ascending order")
 
         values = candles[list(self.base_feature_names)].to_numpy(dtype=np.float32)
-
-        close_time_series = candles["close_time"]
-        if np.issubdtype(close_time_series.dtype, np.datetime64):
-            # pandas stores timezone-aware timestamps in nanoseconds; convert to ms
-            close_times = (
-                close_time_series.astype("int64", copy=False) // 1_000_000
-            ).to_numpy()
-        else:
-            # Accept integer epochs already expressed in milliseconds
-            inferred = pd.to_datetime(close_time_series, unit="ms", utc=True)
-            close_times = (inferred.view("int64") // 1_000_000).to_numpy()
-        close_times = close_times.astype(np.int64)
+        close_times = candles["close_time"].to_numpy(dtype=np.int64)
 
         liquidity_vector = np.array(list(liquidity_features.values()), dtype=np.float32)
         orderbook_vector = np.array(list(orderbook_features.values()), dtype=np.float32)
