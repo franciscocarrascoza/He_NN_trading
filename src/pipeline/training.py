@@ -142,13 +142,8 @@ class HermiteTrainer:
         val_end = dataset.timestamps[val_idx[-1]].item()
 
         def _fmt(ts: int) -> str:
-            # Binance close timestamps are expected in milliseconds, but guard
-            # against inadvertent nanosecond inputs which would overflow
-            # ``pandas`` conversion.
-            ts_int = int(ts)
-            if ts_int > pd.Timestamp.max.value // 1_000_000:
-                ts_int //= 1_000_000
-            return pd.to_datetime(ts_int, unit="ms", utc=True).isoformat()
+            # Binance close timestamps are in milliseconds
+            return pd.to_datetime(ts, unit="ms", utc=True).isoformat()
 
         print(
             "Train period: "

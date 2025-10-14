@@ -37,28 +37,6 @@ def test_dataset_enforces_monotonic_close_time() -> None:
         )
 
 
-def test_timezone_aware_close_times_are_converted_to_ms() -> None:
-    candles = _make_candles(10)
-    candles["close_time"] = pd.date_range(
-        "2023-01-01", periods=len(candles), freq="1min", tz="UTC"
-    )
-    dataset = HermiteDataset(
-        candles,
-        liquidity_features={"liq": 0.1},
-        orderbook_features={"ob": 0.2},
-        feature_window=3,
-        forecast_horizon=1,
-        normalise=False,
-    )
-    expected_anchor_times = (
-        candles["close_time"].iloc[dataset.feature_window - 1 : -dataset.forecast_horizon]
-        .dt.tz_convert("UTC")
-        .astype("int64")
-        // 1_000_000
-    ).to_numpy()
-    assert np.array_equal(dataset.anchor_times.numpy(), expected_anchor_times)
-
-
 def test_targets_and_anchor_alignment() -> None:
     candles = _make_candles(12)
     dataset = HermiteDataset(

@@ -15,12 +15,6 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import (
-    is_datetime64_any_dtype,
-    is_datetime64tz_dtype,
-    is_float_dtype,
-    is_integer_dtype,
-)
 import torch
 from torch.utils.data import Dataset
 
@@ -88,8 +82,7 @@ class HermiteDataset(Dataset):
             raise ValueError("candles must be sorted by close_time in ascending order")
 
         values = candles[list(self.base_feature_names)].to_numpy(dtype=np.float32)
-
-        close_times = _coerce_close_times(candles["close_time"])
+        close_times = candles["close_time"].to_numpy(dtype=np.int64)
 
         liquidity_vector = np.array(list(liquidity_features.values()), dtype=np.float32)
         orderbook_vector = np.array(list(orderbook_features.values()), dtype=np.float32)
@@ -174,38 +167,6 @@ class HermiteDataset(Dataset):
             anchor_time=self.anchor_times[idx],
             target_time=self.target_times[idx],
         )
-
-def _coerce_close_times(series: pd.Series) -> np.ndarray:
-    """Return close timestamps as integer milliseconds since epoch.
-
-    Binance candles arrive either as timezone-aware ``datetime64`` (nanosecond
-    precision) or as raw integer epochs.  Historically we relied on the numpy
-    ``issubdtype`` check which fails for ``DatetimeTZ`` dtypes, leaving the
-    timestamps in nanoseconds.  Downstream code then interpreted those values as
-    milliseconds and triggered ``pandas`` overflow errors when formatting the
-    chronological split.  This helper enforces a single conversion path that
-    normalises every supported representation to UTC milliseconds.
-    """
-
-    if is_datetime64_any_dtype(series) or is_datetime64tz_dtype(series):
-        normalised = pd.to_datetime(series, utc=True, errors="raise")
-        values_ns = normalised.view("int64")
-    elif is_integer_dtype(series) or is_float_dtype(series):
-        numeric = pd.to_numeric(series, errors="raise").astype(np.int64)
-        abs_max = int(np.max(np.abs(numeric))) if numeric.size else 0
-        if abs_max >= 5_000_000_000_000_000:
-            unit = "ns"
-        elif abs_max <= 5_000_000_000:
-            unit = "s"
-        else:
-            unit = "ms"
-        normalised = pd.to_datetime(numeric, unit=unit, utc=True, errors="raise")
-        values_ns = normalised.view("int64")
-    else:
-        parsed = pd.to_datetime(series, utc=True, errors="raise")
-        values_ns = parsed.view("int64")
-
-    return (values_ns // 1_000_000).astype(np.int64)
 
 
 __all__ = ["HermiteDataset", "DatasetItem"]
