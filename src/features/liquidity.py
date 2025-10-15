@@ -36,6 +36,8 @@ class LiquiditySnapshot:
         for idx, row in enumerate(top.itertuples(index=False), start=1):
             features[f"liq_top_{idx}_price"] = float(row.price)
             features[f"liq_top_{idx}_density"] = float(row.liq_density)
+        for key, value in list(features.items()):
+            features[key] = float(np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0))
         return features
 
 
@@ -103,4 +105,48 @@ def compute_liquidity_features(
     return snapshot.summary(top_k=feature_config.liquidity_top_k)
 
 
-__all__ = ["LiquiditySnapshot", "compute_liquidity_features"]
+def compute_liquidity_features_series(
+    candles: pd.DataFrame,
+    *,
+    feature_config: FeatureConfig = FEATURES,
+) -> pd.DataFrame:
+    """Compute liquidity-style features aligned with each candle timestamp.
+
+    These proxies rely solely on historical OHLCV information and therefore
+    respect causal ordering.
+    """
+
+    required = {"volume"}
+    missing = required.difference(candles.columns)
+    if missing:
+        raise KeyError(f"Candles missing required columns for liquidity features: {sorted(missing)}")
+
+    frame = candles.reset_index(drop=True).copy()
+    volume = frame["volume"].astype(float)
+    quote_volume = frame.get("quote_asset_volume", volume * frame.get("close", 0.0)).astype(float)
+    trades = frame.get("number_of_trades", pd.Series(0.0, index=frame.index)).astype(float)
+    taker_buy_base = frame.get("taker_buy_base", pd.Series(0.0, index=frame.index)).astype(float)
+    taker_buy_quote = frame.get("taker_buy_quote", pd.Series(0.0, index=frame.index)).astype(float)
+
+    def _rolling(series: pd.Series, window: int) -> pd.Series:
+        return series.rolling(window=window, min_periods=1).mean()
+
+    features = pd.DataFrame(
+        {
+            "liq_volume_mean_6": _rolling(volume, 6),
+            "liq_volume_mean_12": _rolling(volume, 12),
+            "liq_volume_mean_24": _rolling(volume, 24),
+            "liq_volume_std_12": volume.rolling(window=12, min_periods=1).std(),
+            "liq_trades_mean_12": _rolling(trades, 12),
+            "liq_trades_mean_24": _rolling(trades, 24),
+            "liq_quote_volume_mean_12": _rolling(quote_volume, 12),
+            "liq_quote_volume_mean_24": _rolling(quote_volume, 24),
+            "liq_taker_buy_ratio": (taker_buy_base / (volume + 1e-6)).clip(0.0, 1.0),
+            "liq_taker_quote_ratio": (taker_buy_quote / (quote_volume + 1e-6)).clip(0.0, 1.0),
+            "liq_volume_zscore_24": (volume - _rolling(volume, 24)) / (volume.rolling(24, min_periods=1).std() + 1e-6),
+        }
+    )
+    return features.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32)
+
+
+__all__ = ["LiquiditySnapshot", "compute_liquidity_features", "compute_liquidity_features_series"]

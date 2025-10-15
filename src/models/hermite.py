@@ -40,11 +40,13 @@ class HermiteActivation(nn.Module):
         self.register_buffer("d1", torch.tensor(0.0))
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
+        z = torch.clamp(z, min=-10.0, max=10.0)
         polys = hermite_polynomials(z, self.degree, physicist=self.version == "physicist")
         coeffs = self.coeffs.view(self.degree + 1, *([1] * z.ndim))
         return (polys * coeffs).sum(dim=0) + self.d0 + self.d1 * z
 
     def derivative(self, z: torch.Tensor) -> torch.Tensor:
+        z = torch.clamp(z, min=-10.0, max=10.0)
         if self.degree == 0:
             return torch.zeros_like(z)
         polys = hermite_polynomials(z, self.degree - 1, physicist=self.version == "physicist")
@@ -114,17 +116,25 @@ class HermiteForecaster(nn.Module):
             maps_b=config.hermite_maps_b,
         )
         feature_dim = input_dim + input_dim + 1
-        self.head = nn.Sequential(
+        self.regression_head = nn.Sequential(
+            nn.Linear(feature_dim, config.hermite_hidden_dim),
+            nn.LayerNorm(config.hermite_hidden_dim),
+            nn.GELU(),
+            nn.Linear(config.hermite_hidden_dim, 1),
+        )
+        self.direction_head = nn.Sequential(
             nn.Linear(feature_dim, config.hermite_hidden_dim),
             nn.LayerNorm(config.hermite_hidden_dim),
             nn.GELU(),
             nn.Linear(config.hermite_hidden_dim, 1),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         symmetric_features, jacobian_trace = self.block(x)
         features = torch.cat([x, symmetric_features, jacobian_trace], dim=-1)
-        return self.head(features)
+        pred_log_return = self.regression_head(features)
+        direction_logits = self.direction_head(features)
+        return pred_log_return, direction_logits
 
 
 __all__ = [

@@ -14,7 +14,10 @@ from torch.utils.data import DataLoader, Subset
 
 from src.config import BINANCE, FEATURES, TRAINING, FeatureConfig, TrainingConfig
 from src.data import BinanceDataFetcher, HermiteDataset
-from src.features import compute_liquidity_features, compute_orderbook_features
+from src.features import (
+    compute_liquidity_features_series,
+    compute_orderbook_features_series,
+)
 from src.models import HermiteForecaster
 
 
@@ -27,6 +30,7 @@ class PriceMetrics:
     mape: float
     median_ape: float
     avg_abs_err_last_10: float
+    direction_hit_rate: float
 
 
 @dataclass
@@ -108,16 +112,12 @@ class HermiteTrainer:
     # Dataset preparation
     def prepare_dataset(self, *, normalise: bool = False) -> HermiteDataset:
         candles = self.fetcher.get_historical_candles(limit=BINANCE.history_limit)
-        liquidity_features = compute_liquidity_features(
-            self.fetcher, feature_config=self.feature_config
-        )
-        orderbook_features = compute_orderbook_features(
-            self.fetcher, feature_config=self.feature_config
-        )
+        liquidity_series = compute_liquidity_features_series(candles, feature_config=self.feature_config)
+        orderbook_series = compute_orderbook_features_series(candles, feature_config=self.feature_config)
         dataset = HermiteDataset(
             candles,
-            liquidity_features,
-            orderbook_features,
+            liquidity_features=liquidity_series,
+            orderbook_features=orderbook_series,
             feature_window=self.training_config.feature_window,
             forecast_horizon=self.training_config.forecast_horizon,
             normalise=normalise,
@@ -192,8 +192,24 @@ class HermiteTrainer:
 
         model = HermiteForecaster(input_dim=dataset.features.shape[1], config=self.training_config)
         model.to(self.device)
-        optimiser = torch.optim.Adam(model.parameters(), lr=self.training_config.learning_rate)
-        loss_fn = torch.nn.HuberLoss(delta=1e-3)
+        optimiser = torch.optim.Adam(
+            model.parameters(),
+            lr=self.training_config.learning_rate,
+            weight_decay=self.training_config.weight_decay,
+        )
+        regression_loss_fn = torch.nn.HuberLoss(delta=1e-3)
+        direction_loss_fn = torch.nn.BCEWithLogitsLoss()
+
+        anchor_prices_val = dataset.anchor_prices[val_idx].cpu().numpy()
+        actual_log_returns_val = dataset.targets[val_idx].squeeze(1).cpu().numpy()
+        actual_prices_val = anchor_prices_val * np.exp(actual_log_returns_val)
+
+        patience = max(0, self.training_config.early_stopping_patience)
+        best_val_mae = float("inf")
+        patience_counter = 0
+        best_model_state: Optional[dict[str, torch.Tensor]] = None
+        best_epoch = -1
+        early_stop_triggered = False
 
         model.train()
         train_losses: List[float] = []
@@ -204,11 +220,14 @@ class HermiteTrainer:
             for batch_features, batch_targets in train_loader:
                 batch_features = batch_features.to(self.device)
                 batch_targets = batch_targets.to(self.device)
+                direction_targets = (batch_targets > 0).to(batch_targets.dtype)
                 optimiser.zero_grad()
-                preds = model(batch_features)
-                if not torch.isfinite(preds).all():
+                preds, dir_logits = model(batch_features)
+                if not torch.isfinite(preds).all() or not torch.isfinite(dir_logits).all():
                     raise ValueError("Model produced non-finite predictions during training.")
-                loss = loss_fn(preds, batch_targets)
+                regression_loss = regression_loss_fn(preds, batch_targets)
+                classification_loss = direction_loss_fn(dir_logits, direction_targets)
+                loss = regression_loss + self.training_config.direction_loss_weight * classification_loss
                 if not torch.isfinite(loss):
                     raise ValueError("Encountered non-finite loss during training.")
                 loss.backward()
@@ -224,26 +243,61 @@ class HermiteTrainer:
                 for val_features, val_targets in val_loader:
                     val_features = val_features.to(self.device)
                     val_targets = val_targets.to(self.device)
-                    preds = model(val_features)
-                    loss = loss_fn(preds, val_targets)
+                    direction_targets = (val_targets > 0).to(val_targets.dtype)
+                    preds, dir_logits = model(val_features)
+                    regression_loss = regression_loss_fn(preds, val_targets)
+                    classification_loss = direction_loss_fn(dir_logits, direction_targets)
+                    loss = regression_loss + self.training_config.direction_loss_weight * classification_loss
                     val_loss += loss.item() * val_features.size(0)
             val_loss /= val_length
             val_losses.append(val_loss)
+            with torch.no_grad():
+                val_pred_lr, _ = model(dataset.features[val_idx].to(self.device))
+                val_pred_lr = val_pred_lr.squeeze(1).cpu().numpy()
+            epoch_pred_prices = anchor_prices_val * np.exp(val_pred_lr)
+            epoch_val_mae = float(np.abs(epoch_pred_prices - actual_prices_val).mean())
             print(
                 f"Epoch {epoch + 1}/{self.training_config.num_epochs} - "
-                f"Train Huber: {running_loss:.8f} - Val Huber: {val_loss:.8f}"
+                f"Train loss: {running_loss:.8f} - Val loss: {val_loss:.8f} - Val MAE: {epoch_val_mae:.8f}"
             )
+
+            if patience > 0:
+                if epoch_val_mae + 1e-8 < best_val_mae:
+                    best_val_mae = epoch_val_mae
+                    patience_counter = 0
+                    best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    best_epoch = epoch
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(
+                            f"Early stopping triggered at epoch {epoch + 1} "
+                            f"with validation MAE {epoch_val_mae:.6f}."
+                        )
+                        early_stop_triggered = True
+                        break
+
             model.train()
+
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+            if early_stop_triggered:
+                print(
+                    f"Restored best model from epoch {best_epoch + 1} "
+                    f"(validation MAE {best_val_mae:.6f})."
+                )
 
         model.eval()
         with torch.no_grad():
             val_features = dataset.features[val_idx].to(self.device)
-            predicted_log_returns = model(val_features).squeeze(1).cpu().numpy()
+            predicted_lr_tensor, direction_logits_tensor = model(val_features)
+            predicted_log_returns = predicted_lr_tensor.squeeze(1).cpu().numpy()
+            direction_logits = direction_logits_tensor.squeeze(1).cpu().numpy()
 
-        anchor_prices = dataset.anchor_prices[val_idx].cpu().numpy()
-        actual_log_returns = dataset.targets[val_idx].squeeze(1).cpu().numpy()
+        anchor_prices = anchor_prices_val
+        actual_log_returns = actual_log_returns_val
         predicted_prices = anchor_prices * np.exp(predicted_log_returns)
-        actual_prices = anchor_prices * np.exp(actual_log_returns)
+        actual_prices = actual_prices_val
 
         residuals = predicted_prices - actual_prices
         abs_err = np.abs(residuals)
@@ -254,11 +308,17 @@ class HermiteTrainer:
         median_ape = float(np.median(ape) * 100.0)
         last_10 = abs_err[-10:]
         avg_last_10 = float(last_10.mean()) if last_10.size else float("nan")
+        direction_targets = (actual_log_returns > 0).astype(int)
+        direction_probs = 1.0 / (1.0 + np.exp(-direction_logits))
+        direction_pred = (direction_probs >= 0.5).astype(int)
+        direction_correct = (direction_pred == direction_targets).astype(int)
+        direction_hit_rate = float(direction_correct.mean()) if direction_correct.size else float("nan")
 
         print(
             "Validation price metrics -> "
             f"MAE: {mae:.6f}, RMSE: {rmse:.6f}, MAPE: {mape:.4f}% , "
-            f"Median APE: {median_ape:.4f}%, Avg abs err last 10: {avg_last_10:.6f}"
+            f"Median APE: {median_ape:.4f}%, Avg abs err last 10: {avg_last_10:.6f}, "
+            f"Direction hit-rate: {direction_hit_rate:.4f}"
         )
 
         forecast_frame = pd.DataFrame(
@@ -276,6 +336,9 @@ class HermiteTrainer:
                 "pred_price": predicted_prices,
                 "abs_error": abs_err,
                 "ape_pct": ape * 100.0,
+                "direction_prob": direction_probs,
+                "direction_pred": direction_pred,
+                "direction_hit": direction_correct,
             }
         )
 
@@ -285,6 +348,7 @@ class HermiteTrainer:
             mape=mape,
             median_ape=median_ape,
             avg_abs_err_last_10=avg_last_10,
+            direction_hit_rate=direction_hit_rate,
         )
 
         checkpoint_path = Path(self.training_config.checkpoint_path)
@@ -297,6 +361,9 @@ class HermiteTrainer:
             "feature_std": feature_std.cpu(),
             "feature_names": dataset.feature_names,
             "base_feature_names": list(HermiteDataset.base_feature_names),
+            "causal_feature_names": dataset.causal_feature_names,
+            "liquidity_feature_names": dataset.liquidity_feature_names,
+            "orderbook_feature_names": dataset.orderbook_feature_names,
             "extra_features": dataset.extra_features.cpu(),
             "window": self.training_config.feature_window,
             "horizon": self.training_config.forecast_horizon,
@@ -336,7 +403,8 @@ class HermiteTrainer:
         last_features = dataset.features[artifacts.val_indices[-1]].unsqueeze(0).to(self.device)
         artifacts.model.eval()
         with torch.no_grad():
-            predicted_log_return = artifacts.model(last_features).item()
+            predicted_log_return, _ = artifacts.model(last_features)
+            predicted_log_return = predicted_log_return.item()
         last_price = dataset.anchor_prices[artifacts.val_indices[-1]].item()
         return float(last_price * math.exp(predicted_log_return))
 

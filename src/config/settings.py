@@ -47,6 +47,9 @@ class TrainingConfig:
     random_seed: int = 42
     device_preference: str = "RTX 2060"
     checkpoint_path: str = "artifacts/hermite_forecaster.pt"
+    direction_loss_weight: float = 0.2
+    weight_decay: float = 1e-5
+    early_stopping_patience: int = 5
 
     @property
     def seed(self) -> int:

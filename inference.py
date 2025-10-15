@@ -13,7 +13,13 @@ import torch
 
 from src.config import TRAINING, TrainingConfig
 from src.data.dataset import HermiteDataset
+from src.features import (
+    compute_causal_features,
+    compute_liquidity_features_series,
+    compute_orderbook_features_series,
+)
 from src.models import HermiteForecaster
+from src.features.causal import compute_causal_features
 
 
 def _parse_args() -> argparse.Namespace:
@@ -51,6 +57,12 @@ def _build_feature_vector(
     *,
     window: int,
     base_columns: Sequence[str],
+    causal_features: pd.DataFrame,
+    causal_feature_names: Sequence[str],
+    liquidity_features: pd.DataFrame,
+    liquidity_feature_names: Sequence[str],
+    orderbook_features: pd.DataFrame,
+    orderbook_feature_names: Sequence[str],
     extra_features: torch.Tensor,
 ) -> tuple[torch.Tensor, float]:
     if len(candles) < window:
@@ -60,11 +72,33 @@ def _build_feature_vector(
     if not window_frame["close_time"].is_monotonic_increasing:
         raise ValueError("close_time must be strictly increasing")
 
-    feature_values = []
-    for _, row in window_frame.iterrows():
-        feature_values.extend(float(row[col]) for col in base_columns)
-    feature_vector = torch.tensor(feature_values, dtype=torch.float32)
-    feature_vector = torch.cat([feature_vector, extra_features.to(torch.float32)])
+    base_values = window_frame[base_columns].to_numpy(dtype=np.float32).reshape(-1)
+
+    def _reindex_latest(frame: pd.DataFrame, names: Sequence[str]) -> np.ndarray:
+        if not names:
+            return np.empty(0, dtype=np.float32)
+        series = frame.iloc[-1].reindex(names, fill_value=0.0)
+        return np.nan_to_num(series.to_numpy(dtype=np.float32, copy=True), nan=0.0, posinf=0.0, neginf=0.0)
+
+    causal_vector = _reindex_latest(causal_features, causal_feature_names)
+    liquidity_vector = _reindex_latest(liquidity_features, liquidity_feature_names)
+    orderbook_vector = _reindex_latest(orderbook_features, orderbook_feature_names)
+    extra_vector = (
+        extra_features.to(torch.float32).cpu().numpy() if extra_features.numel() else np.empty(0, dtype=np.float32)
+    )
+
+    components = [base_values]
+    if causal_vector.size:
+        components.append(causal_vector)
+    if liquidity_vector.size:
+        components.append(liquidity_vector)
+    if orderbook_vector.size:
+        components.append(orderbook_vector)
+    if extra_vector.size:
+        components.append(extra_vector)
+
+    feature_array = np.concatenate(components, dtype=np.float32)
+    feature_vector = torch.from_numpy(feature_array)
     anchor_price = float(window_frame.iloc[-1]["close"])
     return feature_vector, anchor_price
 
@@ -99,14 +133,33 @@ def main() -> None:
 
     extra_features = checkpoint.get("extra_features")
     if extra_features is None:
-        raise KeyError("Checkpoint missing 'extra_features'; retrain with the updated pipeline")
-    extra_features = extra_features.to(torch.float32)
+        extra_features = torch.zeros(0, dtype=torch.float32)
+    else:
+        extra_features = extra_features.to(torch.float32)
 
     base_columns = checkpoint.get("base_feature_names") or list(HermiteDataset.base_feature_names)
+    causal_features_df = compute_causal_features(candles[base_columns])
+    causal_feature_names = checkpoint.get("causal_feature_names") or list(causal_features_df.columns)
+    if isinstance(causal_feature_names, tuple):
+        causal_feature_names = list(causal_feature_names)
+    liquidity_features_df = compute_liquidity_features_series(candles)
+    liquidity_feature_names = checkpoint.get("liquidity_feature_names") or list(liquidity_features_df.columns)
+    if isinstance(liquidity_feature_names, tuple):
+        liquidity_feature_names = list(liquidity_feature_names)
+    orderbook_features_df = compute_orderbook_features_series(candles)
+    orderbook_feature_names = checkpoint.get("orderbook_feature_names") or list(orderbook_features_df.columns)
+    if isinstance(orderbook_feature_names, tuple):
+        orderbook_feature_names = list(orderbook_feature_names)
     feature_vector, anchor_price = _build_feature_vector(
         candles,
         window=int(checkpoint["window"]),
         base_columns=base_columns,
+        causal_features=causal_features_df,
+        causal_feature_names=causal_feature_names,
+        liquidity_features=liquidity_features_df,
+        liquidity_feature_names=liquidity_feature_names,
+        orderbook_features=orderbook_features_df,
+        orderbook_feature_names=orderbook_feature_names,
         extra_features=extra_features,
     )
 
@@ -119,13 +172,16 @@ def main() -> None:
     scaled_features = (feature_vector - feature_mean) / feature_std
 
     with torch.no_grad():
-        log_return = model(scaled_features.unsqueeze(0)).item()
+        log_return_tensor, direction_logits = model(scaled_features.unsqueeze(0))
+        log_return = log_return_tensor.item()
+        direction_prob = torch.sigmoid(direction_logits).item()
 
     predicted_price = anchor_price * float(np.exp(log_return))
 
     print(f"Predicted log-return (horizon={training_config.forecast_horizon}): {log_return:.8f}")
     print(f"Anchor price: {anchor_price:.4f}")
     print(f"Predicted future price: {predicted_price:.4f}")
+    print(f"Probability price increases: {direction_prob:.4%}")
 
 
 if __name__ == "__main__":

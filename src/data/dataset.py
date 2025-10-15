@@ -18,6 +18,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from src.features.causal import compute_causal_features
+
 
 def _build_window_feature_names(
     base_columns: Sequence[str], *, window: int
@@ -51,8 +53,8 @@ class DatasetItem:
 class HermiteDataset(Dataset):
     """Windowed, causal dataset feeding the Hermite neural network.
 
-    Each row contains the flattened OHLCV feature window followed by the
-    pre-computed liquidity and order book summary features. No normalisation is
+    Each row contains the flattened OHLCV feature window and, optionally,
+    additional pre-computed features supplied by the caller. No normalisation is
     applied in this class so that training pipelines can compute statistics from
     the training slice exclusively.
     """
@@ -62,8 +64,8 @@ class HermiteDataset(Dataset):
     def __init__(
         self,
         candles: pd.DataFrame,
-        liquidity_features: Dict[str, float],
-        orderbook_features: Dict[str, float],
+        liquidity_features: Dict[str, float] | None = None,
+        orderbook_features: Dict[str, float] | None = None,
         *,
         feature_window: int,
         forecast_horizon: int,
@@ -82,13 +84,55 @@ class HermiteDataset(Dataset):
             raise ValueError("candles must be sorted by close_time in ascending order")
 
         values = candles[list(self.base_feature_names)].to_numpy(dtype=np.float32)
-        close_times = candles["close_time"].to_numpy(dtype=np.int64)
+        close_time_series = candles["close_time"]
+        if pd.api.types.is_datetime64_any_dtype(close_time_series):
+            close_times = (close_time_series.astype("int64") // 1_000_000).to_numpy(dtype=np.int64)
+        else:
+            close_times = close_time_series.to_numpy(dtype=np.int64)
 
-        liquidity_vector = np.array(list(liquidity_features.values()), dtype=np.float32)
-        orderbook_vector = np.array(list(orderbook_features.values()), dtype=np.float32)
-        extra_features = np.concatenate([liquidity_vector, orderbook_vector])
-        self.extra_feature_names = list(liquidity_features.keys()) + list(orderbook_features.keys())
-        self.extra_features = torch.from_numpy(extra_features.copy())
+        liquidity_array: np.ndarray | None = None
+        orderbook_array: np.ndarray | None = None
+        self.liquidity_feature_names: List[str] = []
+        self.orderbook_feature_names: List[str] = []
+
+        if isinstance(liquidity_features, pd.DataFrame):
+            liquidity_frame = liquidity_features.reset_index(drop=True).astype(np.float32)
+            if len(liquidity_frame) != len(candles):
+                raise ValueError("Liquidity feature series must align with candle length.")
+            self.liquidity_feature_names = list(liquidity_frame.columns)
+            liquidity_array = np.nan_to_num(liquidity_frame.to_numpy(), nan=0.0, posinf=0.0, neginf=0.0)
+        elif liquidity_features:
+            liquidity_vector = np.array(list(liquidity_features.values()), dtype=np.float32)
+            liquidity_array = np.tile(liquidity_vector, (len(candles), 1))
+            self.liquidity_feature_names = list(liquidity_features.keys())
+
+        if isinstance(orderbook_features, pd.DataFrame):
+            orderbook_frame = orderbook_features.reset_index(drop=True).astype(np.float32)
+            if len(orderbook_frame) != len(candles):
+                raise ValueError("Order book feature series must align with candle length.")
+            self.orderbook_feature_names = list(orderbook_frame.columns)
+            orderbook_array = np.nan_to_num(orderbook_frame.to_numpy(), nan=0.0, posinf=0.0, neginf=0.0)
+        elif orderbook_features:
+            orderbook_vector = np.array(list(orderbook_features.values()), dtype=np.float32)
+            orderbook_array = np.tile(orderbook_vector, (len(candles), 1))
+            self.orderbook_feature_names = list(orderbook_features.keys())
+
+        extra_features = np.empty(0, dtype=np.float32)
+        self.extra_feature_names: List[str] = []
+        if liquidity_array is None and isinstance(liquidity_features, dict) and liquidity_features:
+            extra_features = np.concatenate([extra_features, np.array(list(liquidity_features.values()), dtype=np.float32)])
+            self.extra_feature_names.extend(liquidity_features.keys())
+        if orderbook_array is None and isinstance(orderbook_features, dict) and orderbook_features:
+            extra_features = np.concatenate([extra_features, np.array(list(orderbook_features.values()), dtype=np.float32)])
+            self.extra_feature_names.extend(orderbook_features.keys())
+        extra_features = np.nan_to_num(extra_features, nan=0.0, posinf=0.0, neginf=0.0)
+        self.extra_features = (
+            torch.from_numpy(extra_features.copy()) if extra_features.size else torch.zeros(0, dtype=torch.float32)
+        )
+
+        causal_df = compute_causal_features(candles[list(self.base_feature_names)])
+        causal_values = np.nan_to_num(causal_df.to_numpy(dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        self.causal_feature_names = list(causal_df.columns)
 
         feature_vectors: List[np.ndarray] = []
         targets: List[float] = []
@@ -112,8 +156,19 @@ class HermiteDataset(Dataset):
             current_close = values[anchor_idx, self.base_feature_names.index("close")]
             future_close = values[future_idx, self.base_feature_names.index("close")]
 
-            feature_vector = np.concatenate([window.flatten(), extra_features], dtype=np.float32)
-            target = float(np.log(future_close / current_close))
+            components: List[np.ndarray] = [window.flatten().astype(np.float32)]
+            if self.causal_feature_names:
+                components.append(causal_values[anchor_idx])
+            if liquidity_array is not None:
+                components.append(liquidity_array[anchor_idx])
+            if orderbook_array is not None:
+                components.append(orderbook_array[anchor_idx])
+            if extra_features.size:
+                components.append(extra_features)
+            feature_vector = np.concatenate(components, dtype=np.float32)
+            feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=0.0, neginf=0.0)
+            raw_target = np.log(future_close / current_close)
+            target = float(np.nan_to_num(raw_target, nan=0.0, posinf=0.0, neginf=0.0))
 
             feature_vectors.append(feature_vector)
             targets.append(target)
@@ -121,8 +176,11 @@ class HermiteDataset(Dataset):
             anchor_times.append(int(close_times[anchor_idx]))
             target_times.append(int(close_times[future_idx]))
 
-        self.features = torch.from_numpy(np.vstack(feature_vectors).astype(np.float32))
-        self.targets = torch.from_numpy(np.array(targets, dtype=np.float32))[:, None]
+        features_array = np.nan_to_num(np.vstack(feature_vectors), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        targets_array = np.nan_to_num(np.array(targets, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
+        self.features = torch.from_numpy(features_array)
+        self.targets = torch.from_numpy(targets_array)[:, None]
         self.anchor_prices = torch.from_numpy(np.array(anchor_prices, dtype=np.float32))
         self.anchor_times = torch.from_numpy(np.array(anchor_times, dtype=np.int64))
         self.target_times = torch.from_numpy(np.array(target_times, dtype=np.int64))
@@ -147,9 +205,13 @@ class HermiteDataset(Dataset):
                 "and apply scaling in the training pipeline."
             )
 
-        self.feature_names = _build_window_feature_names(
-            self.base_feature_names, window=feature_window
-        ) + self.extra_feature_names
+        self.feature_names = (
+            _build_window_feature_names(self.base_feature_names, window=feature_window)
+            + self.causal_feature_names
+            + self.liquidity_feature_names
+            + self.orderbook_feature_names
+            + self.extra_feature_names
+        )
 
     def __len__(self) -> int:
         return self.features.shape[0]

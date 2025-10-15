@@ -54,6 +54,9 @@ def _build_training_config(
     validation_split: float,
     random_seed: int,
     device_preference: str,
+    direction_loss_weight: float,
+    weight_decay: float,
+    early_stopping_patience: int,
 ) -> TrainingConfig:
     return replace(
         TRAINING,
@@ -70,6 +73,9 @@ def _build_training_config(
         validation_split=validation_split,
         random_seed=random_seed,
         device_preference=device_preference,
+        direction_loss_weight=direction_loss_weight,
+        weight_decay=weight_decay,
+        early_stopping_patience=early_stopping_patience,
     )
 
 
@@ -78,13 +84,25 @@ def _render_results(trainer: HermiteTrainer, artifacts) -> None:
     next_price = trainer.predict_next_price(artifacts)
     metrics = artifacts.price_metrics
 
-    price_delta_true = forecast_frame["true_price"] - forecast_frame["anchor_price"]
-    price_delta_pred = forecast_frame["pred_price"] - forecast_frame["anchor_price"]
-    directionality = (np.sign(price_delta_true) == np.sign(price_delta_pred)).astype(int)
+    if "direction_hit" in forecast_frame:
+        directionality = forecast_frame["direction_hit"].astype(int)
+        if "direction_prob" in forecast_frame:
+            forecast_frame["direction_probability"] = forecast_frame["direction_prob"]
+        if "direction_pred" in forecast_frame:
+            forecast_frame["direction_prediction"] = forecast_frame["direction_pred"].astype(int)
+    else:
+        price_delta_true = forecast_frame["true_price"] - forecast_frame["anchor_price"]
+        price_delta_pred = forecast_frame["pred_price"] - forecast_frame["anchor_price"]
+        directionality = (np.sign(price_delta_true) == np.sign(price_delta_pred)).astype(int)
+        forecast_frame["direction_hit"] = directionality
+        forecast_frame["direction_probability"] = np.nan
+        forecast_frame["direction_prediction"] = np.sign(price_delta_pred).clip(min=0).astype(int)
     forecast_frame["directionality"] = directionality
     total_predictions = len(directionality)
     correct_predictions = int(directionality.sum())
     directional_accuracy = (correct_predictions / total_predictions) * 100 if total_predictions else 0.0
+    if hasattr(metrics, "direction_hit_rate") and not np.isnan(metrics.direction_hit_rate):
+        directional_accuracy = metrics.direction_hit_rate * 100
 
     with st.container():
         st.markdown(
@@ -187,6 +205,8 @@ def _render_results(trainer: HermiteTrainer, artifacts) -> None:
                 "pred_price",
                 "abs_error",
                 "ape_pct",
+                "direction_prediction",
+                "direction_probability",
                 "directionality",
             ]].rename(columns={
                 "target_time": "Target Time",
@@ -195,6 +215,8 @@ def _render_results(trainer: HermiteTrainer, artifacts) -> None:
                 "pred_price": "Predicted Price",
                 "abs_error": "Absolute Error",
                 "ape_pct": "APE %",
+                "direction_prediction": "Pred Direction",
+                "direction_probability": "P(Up)",
                 "directionality": "Directionality",
             })
         )
@@ -209,7 +231,7 @@ def run_app() -> None:
         "visualise historical and predicted BTC prices."
     )
 
-    controls_col, chart_col = st.columns([0.5, 2])
+    controls_col, chart_col = st.columns([0.7, 2])
 
     with controls_col:
         st.header("Data source")
@@ -236,26 +258,41 @@ def run_app() -> None:
             long_short_period = st.text_input("Long/short ratio period", value=BINANCE.long_short_period)
 
         st.header("Training hyper-parameters")
-        train_col1, train_col2 = st.columns(2)
+        train_col1, train_col2, train_col3 = st.columns(3)
         with train_col1:
             batch_size = st.number_input("Batch size", value=TRAINING.batch_size, min_value=8, max_value=1024, step=8)
             num_epochs = st.number_input("Epochs", value=TRAINING.num_epochs, min_value=1, max_value=500)
+            hermite_degree = st.number_input("Hermite degree", value=TRAINING.hermite_degree, min_value=1, max_value=12)
             hermite_maps_a = st.number_input("Hermite maps A", value=TRAINING.hermite_maps_a, min_value=1, max_value=8)
-            hermite_hidden_dim = st.number_input(
-                "Hermite hidden dim", value=TRAINING.hermite_hidden_dim, min_value=8, max_value=512, step=8
-            )
-            feature_window = st.number_input("Feature window", value=TRAINING.feature_window, min_value=8, max_value=512, step=8)
         with train_col2:
             learning_rate = st.number_input(
                 "Learning rate", value=float(TRAINING.learning_rate), min_value=1e-5, max_value=1e-1, format="%.5f"
             )
-            hermite_degree = st.number_input("Hermite degree", value=TRAINING.hermite_degree, min_value=1, max_value=12)
             hermite_maps_b = st.number_input("Hermite maps B", value=2, min_value=1, max_value=8)
+            hermite_hidden_dim = st.number_input(
+                "Hermite hidden dim", value=TRAINING.hermite_hidden_dim, min_value=8, max_value=512, step=8
+            )
+            feature_window = st.number_input("Feature window", value=TRAINING.feature_window, min_value=8, max_value=512, step=8)
             jacobian_mode = st.selectbox(
                 "Jacobian mode", options=["summary", "full", "none"], index=["summary", "full", "none"].index("full")
             )
+        with train_col3:
             validation_split = st.slider(
                 "Validation split", min_value=0.05, max_value=0.5, value=float(TRAINING.validation_split)
+            )
+            direction_loss_weight = st.number_input(
+                "Direction loss weight", value=float(TRAINING.direction_loss_weight), min_value=0.0, max_value=1.0, step=0.01
+            )
+            weight_decay = st.number_input(
+                "Weight decay",
+                value=float(TRAINING.weight_decay),
+                min_value=0.0,
+                max_value=1e-2,
+                step=1e-6,
+                format="%.6f",
+            )
+            early_stopping_patience = st.number_input(
+                "Early stopping patience", value=TRAINING.early_stopping_patience, min_value=0, max_value=100, step=1
             )
             random_seed = st.number_input("Random seed", value=TRAINING.random_seed, min_value=0, max_value=2**31 - 1)
             device_preference = st.text_input("Preferred CUDA device", value=TRAINING.device_preference)
@@ -291,6 +328,9 @@ def run_app() -> None:
             validation_split=float(validation_split),
             random_seed=int(random_seed),
             device_preference=device_preference,
+            direction_loss_weight=float(direction_loss_weight),
+            weight_decay=float(weight_decay),
+            early_stopping_patience=int(early_stopping_patience),
         )
 
         fetcher = BinanceDataFetcher(binance_config)
