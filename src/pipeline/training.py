@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import math
 import random
 from dataclasses import asdict, dataclass
@@ -86,6 +87,14 @@ class HermiteTrainer:
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
+            workspace_cfg = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+            if workspace_cfg not in (":16:8", ":4096:8"):
+                default_cfg = ":4096:8"
+                os.environ["CUBLAS_WORKSPACE_CONFIG"] = default_cfg
+                print(
+                    "Configured CUBLAS_WORKSPACE_CONFIG "
+                    f"to '{default_cfg}' for deterministic CUDA matmuls."
+                )
             torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -162,6 +171,10 @@ class HermiteTrainer:
         dataset.features = (dataset.features - feature_mean) / feature_std
         dataset.feature_mean = feature_mean
         dataset.feature_std = feature_std
+        if not torch.isfinite(dataset.features).all():
+            raise ValueError("Encountered non-finite feature values after scaling.")
+        if not torch.isfinite(dataset.targets).all():
+            raise ValueError("Encountered non-finite target values.")
 
         train_subset = Subset(dataset, train_idx.tolist())
         val_subset = Subset(dataset, val_idx.tolist())
@@ -193,7 +206,11 @@ class HermiteTrainer:
                 batch_targets = batch_targets.to(self.device)
                 optimiser.zero_grad()
                 preds = model(batch_features)
+                if not torch.isfinite(preds).all():
+                    raise ValueError("Model produced non-finite predictions during training.")
                 loss = loss_fn(preds, batch_targets)
+                if not torch.isfinite(loss):
+                    raise ValueError("Encountered non-finite loss during training.")
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimiser.step()
