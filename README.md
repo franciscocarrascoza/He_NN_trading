@@ -1,178 +1,150 @@
-# Hermite Neural Network Trading Toolkit
+# BLS-SkipDFS Trajectory Analyzer
 
-This project provides a modular pipeline to forecast the next Bitcoin hourly price using a Hermite-based neural network. The model ingests three sources of information:
+`bls_analyze` is a standalone C++ tool that reproduces the BLS + Skip-DFS
+algorithm for fast cluster detection on molecular dynamics trajectories. It
+consumes common GROMACS formats (XTC/TRR/TNG) alongside GRO/PDB snapshots,
+voxelises the selected atoms into a lattice-aware occupancy grid, and reports
+per-frame connectivity metrics that can be compared directly against PLUMED
+outputs.
 
-1. **OHLCV history** – the latest 3,000 hourly futures candles from Binance.
-2. **Synthetic liquidity map** – a Coinglass-inspired liquidation density estimator derived from Binance derivatives metrics.
-3. **Order book snapshot** – aggregated bid/ask depth and imbalance statistics.
+## Key capabilities
+
+- **Flexible I/O** – modular trajectory readers with optional `xdrfile` (XTC/TRR)
+  and `tng_io` (TNG) back-ends; text readers for GRO/PDB frames are always
+  available.
+- **PLUMED-style configuration** – a single `BLS ...` block defines groups,
+  voxel spacing, lattice/centering, skip length, and the metrics to emit.
+- **BLS seed pre-filter** – enumerates lattice points for cubic, hexagonal, and
+  triclinic families with P/F/I centerings, scales them via the requested dNN,
+  then triggers Skip-DFS refinement only on occupied seeds.
+- **Skip-DFS refinement** – non-recursive DFS with 6/18/26 connectivity, PBC aware
+  ray-casting, and support for ANY/ALL occupancy rules with optional cutoff
+  padding.
+- **Rich instrumentation** – CSV rows and JSON lines record frame ID, box
+  resolution, seed statistics, cluster counts, and timing; optional comparison
+  against PLUMED COLVAR/CSV files yields accuracy and speed-up summaries.
+- **Parallel voxelisation** – OpenMP (when enabled) accelerates rasterisation and
+  seed checks without affecting determinism.
+
+## Building
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+Optional dependencies can be toggled at configure time:
+
+- `-DUSE_XDRFILE=ON` – link against `libxdrfile` to enable XTC/TRR support.
+- `-DUSE_TNG=ON` – link against `libtng_io` to enable TNG support.
+
+The resulting binaries are placed under `build/`:
+
+- `bls_analyze` – command-line analyzer.
+- `bls_tests` – unit test harness covering lattice scaling, connectivity modes,
+  PBC handling, and deterministic runs.
+
+Run the tests with `ctest --test-dir build`.
+
+A minimal Docker recipe (`Dockerfile`) is provided to produce a clean Ubuntu
+container with the analyzer pre-built.
+
+## Configuration
+
+The analyzer consumes a PLUMED-style control file. A minimal example is bundled
+at `cpp/examples/bls.in`:
+
+```plumed
+BLS ...
+  GROUP ATOMS=all
+  BOX AUTO
+  GRID_SPACING 0.25
+  LATTICE cubic
+  CENTERING F
+  CONNECTIVITY 6
+  DNN 0
+  ALPHA 0.7
+  RADII 1.5,2.0
+  SKIP 3
+  OUTPUT NCLUSTERS,MAX_CLUSTER,SEED_HITS,SEEDS,REFINED_VOXELS
+... BLS
+```
+
+Key directives:
+
+- `GROUP` – select atoms (`ATOMS=all`, `index:1-100`, `name:OW`, or combinations
+  separated by `|`).
+- `BOX` – `AUTO` uses trajectory boxes; otherwise provide explicit `XLO/XHI` etc.
+- `GRID_SPACING` – voxel size in length units.
+- `LATTICE` + `CENTERING` – choose unit basis and centering offsets.
+- `DNN`/`RADII`/`ALPHA` – control the nearest-neighbour spacing used to scale the
+  lattice (automatic when `DNN=0`).
+- `SKIP` – maximum Skip-DFS ray length.
+- `CONNECTIVITY` – neighbourhood (6/18/26).
+- `OCCUPANCY` + `CUTOFF` – ANY/ALL occupancy rule with optional radius padding.
+- `OUTPUT` – metrics to report (all core metrics are always recorded; this list
+  controls optional extras such as cluster sizes in JSON).
+
+## Command-line usage
+
+```bash
+./build/bls_analyze \
+  --traj traj.xtc \
+  --conf cpp/examples/bls.in \
+  --top system.pdb \
+  --out metrics.csv \
+  --json metrics.json \
+  --stride 5 \
+  --compare-plumed plumed_colvar.dat
+```
+
+Available flags:
+
+| Option | Description |
+| ------ | ----------- |
+| `--traj` | Trajectory file (XTC/TRR/TNG/GRO/PDB). |
+| `--conf` | PLUMED-style configuration block. |
+| `--top` | Optional topology (GRO/PDB) for named selections. |
+| `--out` | CSV metrics path. |
+| `--json` | JSON-lines metrics path. |
+| `--stride` | Process every *N*-th frame (also multiplied by the config STRIDE). |
+| `--start/--stop` | Frame index range (inclusive). Use `--stop inf` for no upper bound. |
+| `--threads` | OpenMP threads (ignored if OpenMP disabled at build time). |
+| `--format` | Override automatic trajectory format detection. |
+| `--compare-plumed` | Reference PLUMED CSV/COLVAR for accuracy and timing comparisons. |
+
+The analyzer prints per-frame summaries, writes CSV/JSON outputs when requested,
+reports aggregate runtime/memory, and (if provided) prints comparison statistics
+versus PLUMED including mean absolute and RMS errors and Kendall τ for maximum
+cluster ranking.
+
+## Tests
+
+Unit tests live in `cpp/tests/TestMain.cpp` and validate:
+
+- Correct FCC nearest-neighbour scaling.
+- Connectivity differences between 6- and 26-neighbour schemes.
+- Periodic boundary handling across wrapped voxels.
+- Deterministic BLS/Skip-DFS execution across repeated runs.
+
+Execute them via `ctest` or directly with `./build/bls_tests`.
 
 ## Project layout
 
 ```
-.
-├── main.py                   # Command line entry-point
-├── inference.py              # Standalone checkpoint inference helper
+cpp/
 ├── src/
-│   ├── __init__.py
-│   ├── config/               # Centralised configuration dataclasses
-│   │   └── settings.py
-│   ├── data/                 # Binance REST client
-│   │   ├── binance_fetcher.py
-│   │   └── dataset.py        # Causal sliding-window dataset
-│   ├── features/             # Feature engineering modules
-│   │   ├── liquidity.py
-│   │   └── orderbook.py
-│   ├── models/               # Hermite neural network definition
-│   │   └── hermite.py
-│   ├── eval/                 # Offline evaluation helpers
-│   │   └── evaluate.py
-│   └── pipeline/             # Training utilities
-│       └── training.py
+│   ├── bls/            # BLS orchestrator and metrics
+│   ├── config/         # PLUMED-style parser
+│   ├── grid/           # Voxel grid + rasteriser
+│   ├── io/             # Trajectory readers and factory
+│   ├── lattice/        # Basis and seed enumerator helpers
+│   ├── refine/         # Skip-DFS implementation
+│   └── util/           # Logging, math utilities, timers
+├── tests/              # Standalone test executable
+└── examples/           # Sample configuration
 ```
 
-Configuration values such as symbol, intervals, network hyper-parameters, and feature engineering controls are defined in `src/config/settings.py` and can be adjusted from a single location.
+All code follows a PLUMED-friendly structure so the analyzer can be embedded or
+cross-validated in future PLUMED modules without significant refactoring.
 
-## Environment setup
-
-### Conda workflow (recommended)
-
-```bash
-conda create -n hermite-nn python=3.10 -y
-conda activate hermite-nn
-# Install PyTorch with CUDA support (includes drivers for RTX 2060-class GPUs)
-conda install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia -y
-conda install numpy pandas requests scipy plotly streamlit -y
-```
-
-If you already maintain a CUDA-enabled PyTorch installation, you only need to ensure that the environment exposes the `torch` package compiled with GPU support.
-
-### pip workflow
-
-```bash
-pip install numpy pandas requests scipy torch plotly streamlit --extra-index-url https://download.pytorch.org/whl/cu118
-```
-
-The `--extra-index-url` flag fetches the GPU-enabled wheels (compatible with RTX 2060) from the official PyTorch repository.
-
-### Troubleshooting PyTorch import errors
-
-If importing PyTorch fails with an error similar to:
-
-```
-ImportError: .../libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
-```
-
-the environment is missing Intel's JIT profiling symbols that ship with the
-`intel-openmp` runtime. This typically occurs when a conda environment upgrades
-`torch` without pulling the matching OpenMP dependency, leaving an older
-`libiomp5.so` on the search path. Fix the issue by reinstalling the Intel
-runtime in the active environment:
-
-```bash
-conda install intel-openmp -y
-# or, if you prefer conda-forge packages
-conda install -c conda-forge libiomp -y
-```
-
-After reinstalling, restart the shell so the loader picks up the refreshed
-library. Alternatively, reinstalling PyTorch with matching channels (e.g.
-`conda install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia -y`) brings the
-correct dependency set back in place.
-
-## Usage
-
-Run the training pipeline with:
-
-```bash
-python main.py
-```
-
-The script will:
-
-1. Download the latest 3,000 hourly BTCUSDT futures candles from Binance.
-2. Build the liquidity-map and order-book feature sets.
-3. Assemble a sliding-window dataset, split it into training/validation subsets, and train the Hermite neural network.
-4. Print the predicted price for the next hourly close.
-
-The pipeline automatically stores a reproducible checkpoint under
-`artifacts/hermite_forecaster.pt` (configurable via `--save`). The checkpoint
-includes the model weights, optimiser state, feature list, train-only scaler
-statistics, and the train/validation timestamp ranges.
-
-### Interactive control panel
-
-To manipulate data-source parameters, training hyper-parameters, and plot the historical vs. predicted prices, launch the Streamlit interface:
-
-```bash
-streamlit run src/interface/app.py
-```
-
-The left-hand panel exposes Binance symbol, interval, look-back size, and
-Hermite NN hyper-parameters. Set the forecast horizon slider to any integer
-between 1 and 15 hours to control how far ahead the network predicts. After
-clicking **Start training**, the right-hand side renders the loss curves
-together with historical candles, observed futures closes, the model's
-forecasts, and the running average absolute error across the last ten
-validation predictions (also displayed directly on the chart).
-
-## Training and validation process
-
-The pipeline trains through `src/pipeline/training.py` and follows these steps:
-
-1. **Dataset preparation** – constructs causal OHLCV windows and appends
-   liquidity/order-book summaries without performing any in-place
-   normalisation.
-2. **Chronological split** – keeps the earliest samples for training and
-   reserves the last `validation_split` fraction for validation. The train/val
-   timestamp ranges are printed to stdout for every run.
-3. **GPU-aware execution** – automatically selects an NVIDIA RTX 2060 if
-   present (`TrainingConfig.device_preference`). When unavailable, it falls
-   back to the next CUDA device or CPU.
-4. **Robust optimisation** – trains with the Huber loss (`delta=1e-3`) and
-   clips gradients to `max_norm=1.0` for stability.
-5. **Price-space validation** – after each epoch, reports the validation Huber
-   loss, and after training computes MAE, RMSE, MAPE, median APE, and the mean
-   absolute error over the last 10 validation predictions in price units.
-
-Example console snippet:
-
-```
-Setting deterministic seed: 42
-Train period: 2023-01-01T00:00:00+00:00 -> 2023-04-01T23:00:00+00:00 (1672531200000 -> 1680390000000)
-Validation period: 2023-04-02T00:00:00+00:00 -> 2023-04-30T23:00:00+00:00 (1680393600000 -> 1682895600000)
-Epoch 1/10 - Train Huber: 0.00001234 - Val Huber: 0.00002157
-...
-Validation price metrics -> MAE: 15.238401, RMSE: 22.719076, MAPE: 0.4123% , Median APE: 0.3011%, Avg abs err last 10: 11.904200
-Checkpoint saved to artifacts/hermite_forecaster.pt
-```
-
-These metrics are mirrored in the Streamlit dashboard and stored with the
-checkpoint for downstream evaluation.
-
-### Offline evaluation and inference
-
-Use the dedicated scripts to analyse or deploy trained checkpoints:
-
-```bash
-# Evaluate the validation slice recorded in the checkpoint
-python -m src.eval.evaluate artifacts/hermite_forecaster.pt --csv-output reports/val_predictions.csv
-
-# Run inference on your own candle history
-python inference.py --ckpt artifacts/hermite_forecaster.pt --csv path/to/latest_candles.csv
-```
-
-The evaluation utility reloads the saved scalers, reconstructs validation price
-predictions, and prints the MAE/RMSE/MAPE/median APE metrics while optionally
-writing a detailed CSV report. The inference helper expects a CSV with at least
-`open,high,low,close,volume,close_time` columns and outputs both the predicted
-log-return and price at the configured horizon.
-
-## Extending the project
-
-* Update `FeatureConfig` or `TrainingConfig` in `src/config/settings.py` to change look-back windows, Hermite polynomial degree, or optimisation hyper-parameters.
-* Implement additional feature transforms by adding new modules under `src/features/` and combining them within the training pipeline.
-* Swap the Binance REST client with a websocket-driven data source by extending `src/data/binance_fetcher.py`.
-
-## Disclaimer
-
-This repository is intended for research and educational purposes. Cryptocurrency markets are highly volatile; no warranty is provided regarding the performance of the forecasts.
