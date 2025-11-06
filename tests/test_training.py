@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import pytest
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+os.environ.setdefault("KMP_AFFINITY", "disabled")
+os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 torch = pytest.importorskip("torch")
 
-from src.config import TRAINING
+from src.config import APP_CONFIG, DATA, EVALUATION, REPORTING, TRAINING, DataConfig
 from src.data.dataset import HermiteDataset
-from src.pipeline.training import HermiteTrainer
-from src.features import compute_liquidity_features_series, compute_orderbook_features_series
+from src.pipeline import HermiteTrainer
+from src.pipeline.scaler import LeakageGuardScaler
+from src.pipeline.split import RollingOriginSplitter
 
 
 def _make_candles(count: int) -> pd.DataFrame:
@@ -20,7 +31,7 @@ def _make_candles(count: int) -> pd.DataFrame:
         "open": np.linspace(100.0, 100.0 + count - 1, count),
         "high": np.linspace(101.0, 101.0 + count - 1, count),
         "low": np.linspace(99.0, 99.0 + count - 1, count),
-        "close": np.linspace(100.0, 100.0 + count - 1, count),
+        "close": np.linspace(100.0, 100.5 + count - 1, count),
         "volume": np.linspace(10.0, 10.0 + count - 1, count),
         "quote_asset_volume": np.linspace(1000.0, 1200.0, count),
         "number_of_trades": np.linspace(50, 80, count),
@@ -31,96 +42,113 @@ def _make_candles(count: int) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def _make_config(window: int, horizon: int) -> DataConfig:
+    return replace(DATA, feature_window=window, forecast_horizon=horizon)
+
+
 def _make_dataset(num_candles: int = 40, window: int = 5, horizon: int = 2) -> HermiteDataset:
     candles = _make_candles(num_candles)
-    liquidity_series = compute_liquidity_features_series(candles)
-    orderbook_series = compute_orderbook_features_series(candles)
-    return HermiteDataset(
+    config = _make_config(window=window, horizon=horizon)
+    return HermiteDataset(candles, data_config=config)
+
+
+def test_scaler_prevents_future_indices() -> None:
+    dataset = _make_dataset()
+    scaler_idx = torch.arange(len(dataset) - 5)
+    scaler = LeakageGuardScaler(max_index=int(scaler_idx[-1].item()))
+    scaler.fit(dataset.features, scaler_idx)
+
+    with pytest.raises(ValueError):
+        bad_indices = torch.arange(len(dataset))
+        scaler.fit(dataset.features, bad_indices)
+
+
+def test_scaler_has_nonzero_variance() -> None:
+    dataset = _make_dataset()
+    scaler_idx = torch.arange(len(dataset) - 5)
+    scaler = LeakageGuardScaler(max_index=int(scaler_idx[-1].item()))
+    _, stats = scaler.fit_transform(dataset.features, scaler_idx)
+    assert torch.all(stats.std > 0.0)
+
+
+def test_log_return_features_zero_mean_after_scaling() -> None:
+    dataset = _make_dataset()
+    scaler_idx = torch.arange(len(dataset) - 5)
+    scaler = LeakageGuardScaler(max_index=int(scaler_idx[-1].item()))
+    scaled_features, _ = scaler.fit_transform(dataset.features, scaler_idx)
+    train_features = scaled_features.index_select(0, scaler_idx)
+    log_ret_columns = [idx for idx, name in enumerate(dataset.feature_names) if name.startswith("log_ret_close")]
+    assert log_ret_columns, "Expected log_ret_close features to be present."
+    subset = train_features[:, log_ret_columns]
+    means = subset.mean(dim=0)
+    assert torch.allclose(means, torch.zeros_like(means), atol=1e-5)
+
+
+def test_rolling_split_prevents_leakage() -> None:
+    dataset = _make_dataset(num_candles=80, window=6, horizon=2)
+    data_cfg = _make_config(window=6, horizon=2)
+    evaluation_cfg = replace(EVALUATION, val_block=8, cv_folds=1, calibration_fraction=0.1)
+    splitter = RollingOriginSplitter(
+        dataset_length=len(dataset),
+        data_config=data_cfg,
+        evaluation_config=evaluation_cfg,
+    )
+    folds = splitter.split(use_cv=False)
+    assert folds, "Expected at least one fold."
+    fold = folds[0]
+    assert torch.max(fold.train_idx) < torch.min(fold.val_idx)
+    assert torch.max(fold.calibration_idx) < torch.min(fold.val_idx)
+    assert torch.max(fold.scaler_idx) < torch.min(fold.val_idx)
+
+
+def test_trainer_guard_on_direction_label_mismatch(tmp_path) -> None:
+    candles = _make_candles(60)
+    candles["close"] = 100.0 + np.sin(np.arange(60) / 2.0)
+    dataset = HermiteDataset(
         candles,
-        liquidity_features=liquidity_series,
-        orderbook_features=orderbook_series,
-        feature_window=window,
-        forecast_horizon=horizon,
-        normalise=False,
+        data_config=_make_config(window=5, horizon=1),
     )
-
-
-def test_scaler_fit_uses_train_slice_only(tmp_path) -> None:
-    dataset = _make_dataset()
-    raw_features = dataset.features.clone()
+    dataset.direction_labels = 1 - dataset.direction_labels
+    data_cfg = _make_config(window=5, horizon=1)
+    training_cfg = replace(TRAINING, num_epochs=1, batch_size=8, seed=0, scheduler="none", enable_lr_range_test=False)
+    evaluation_cfg = replace(EVALUATION, save_markdown=False, val_block=10, cv_folds=1, calibration_fraction=0.1)
+    reporting_cfg = replace(REPORTING, output_dir=str(tmp_path))
     config = replace(
+        APP_CONFIG,
+        data=data_cfg,
+        training=training_cfg,
+        evaluation=evaluation_cfg,
+        reporting=reporting_cfg,
+    )
+    trainer = HermiteTrainer(config=config, device=torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="Direction labels mismatch"):
+        trainer.run(dataset=dataset, use_cv=False, results_dir=tmp_path)
+
+
+def test_training_fails_on_extreme_imbalance_without_mitigation(tmp_path) -> None:
+    data_cfg = _make_config(window=4, horizon=1)
+    candles = _make_candles(60)
+    dataset = HermiteDataset(candles, data_config=data_cfg)
+    training_cfg = replace(
         TRAINING,
         num_epochs=1,
         batch_size=8,
-        validation_split=0.25,
-        checkpoint_path=str(tmp_path / "ckpt.pt"),
+        seed=0,
+        scheduler="none",
+        enable_lr_range_test=False,
+        auto_pos_weight=False,
+        classification_loss="bce",
+        enable_class_downsample=False,
     )
-    trainer = HermiteTrainer(fetcher=None, training_config=config)
-    artifacts = trainer.train(dataset=dataset)
-
-    total_len = len(dataset)
-    val_len = max(1, int(total_len * config.validation_split))
-    train_len = total_len - val_len
-    expected_mean = raw_features[:train_len].mean(dim=0)
-    expected_std = raw_features[:train_len].std(dim=0, unbiased=False).clamp_min(1e-6)
-
-    assert torch.allclose(artifacts.feature_mean, expected_mean, atol=1e-6)
-    assert torch.allclose(artifacts.feature_std, expected_std, atol=1e-6)
-    assert artifacts.train_indices[-1] < artifacts.val_indices[0]
-    assert artifacts.checkpoint_path.exists()
-
-
-def test_price_reconstruction_matches_targets(tmp_path) -> None:
-    dataset = _make_dataset()
+    evaluation_cfg = replace(EVALUATION, save_markdown=False, val_block=10, cv_folds=1, calibration_fraction=0.1)
+    reporting_cfg = replace(REPORTING, output_dir=str(tmp_path))
     config = replace(
-        TRAINING,
-        num_epochs=1,
-        batch_size=8,
-        validation_split=0.2,
-        checkpoint_path=str(tmp_path / "ckpt.pt"),
+        APP_CONFIG,
+        data=data_cfg,
+        training=training_cfg,
+        evaluation=evaluation_cfg,
+        reporting=reporting_cfg,
     )
-    trainer = HermiteTrainer(fetcher=None, training_config=config)
-    artifacts = trainer.train(dataset=dataset)
-
-    frame = artifacts.forecast_frame
-    anchors = frame["anchor_price"].to_numpy()
-    true_lr = frame["true_log_return"].to_numpy()
-    pred_lr = frame["pred_log_return"].to_numpy()
-
-    true_prices = anchors * np.exp(true_lr)
-    pred_prices = anchors * np.exp(pred_lr)
-    assert np.allclose(frame["true_price"].to_numpy(), true_prices)
-    assert np.allclose(frame["pred_price"].to_numpy(), pred_prices)
-    assert np.allclose(frame["abs_error"].to_numpy(), np.abs(pred_prices - true_prices))
-    assert "direction_prob" in frame.columns
-    assert np.all((frame["direction_prob"].to_numpy() >= 0.0) & (frame["direction_prob"].to_numpy() <= 1.0))
-    assert np.all(frame["direction_hit"].isin([0, 1]))
-
-
-def test_dataset_uses_causal_windows() -> None:
-    window = 4
-    horizon = 3
-    num_candles = 32
-    dataset = _make_dataset(num_candles=num_candles, window=window, horizon=horizon)
-    base_names = HermiteDataset.base_feature_names
-    close_idx = base_names.index("close")
-    close_times = dataset.candles["close_time"].to_numpy()
-    values = dataset.candles["close"].to_numpy()
-    for idx in range(len(dataset)):
-        anchor_idx = window - 1 + idx
-        target_idx = anchor_idx + horizon
-        item = dataset.item(idx)
-        assert item.anchor_time.item() == close_times[anchor_idx]
-        assert item.target_time.item() == close_times[target_idx]
-        window_slice = values[anchor_idx - window + 1:anchor_idx + 1]
-        flattened = (
-            item.features[: window * len(base_names)]
-            .view(window, len(base_names))
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        # Most recent close in window must match anchor close price
-        assert np.isclose(flattened[-1, close_idx], values[anchor_idx])
-        # Future close should never appear in the window
-        assert not np.isclose(window_slice, values[target_idx]).any()
+    trainer = HermiteTrainer(config=config, device=torch.device("cpu"))
+    with pytest.raises(ValueError, match="all-same-sign labels"):
+        trainer.run(dataset=dataset, use_cv=False, results_dir=tmp_path)

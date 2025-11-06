@@ -1,178 +1,211 @@
-# Hermite Neural Network Trading Toolkit
+# Hermite NN Trading – Probabilistic Pipeline
 
-This project provides a modular pipeline to forecast the next Bitcoin hourly price using a Hermite-based neural network. The model ingests three sources of information:
+This repository implements a calibrated forecasting stack for crypto markets. A Hermite-based neural network consumes stationary, leak-safe features, produces calibrated Gaussian forecasts plus up-probabilities, and reports an extensive “randomness vs skill” diagnostic suite. The pipeline supports single chronological splits or rolling-origin cross-validation (ROCV), conformal intervals, per-trade p-values, and simple trading policy evaluation.
 
-1. **OHLCV history** – the latest 3,000 hourly futures candles from Binance.
-2. **Synthetic liquidity map** – a Coinglass-inspired liquidation density estimator derived from Binance derivatives metrics.
-3. **Order book snapshot** – aggregated bid/ask depth and imbalance statistics.
+---
 
 ## Project layout
 
 ```
 .
-├── main.py                   # Command line entry-point
-├── inference.py              # Standalone checkpoint inference helper
+├── main.py                     # CLI entry point
+├── inference.py                # Lightweight checkpoint inference helper
 ├── src/
-│   ├── __init__.py
-│   ├── config/               # Centralised configuration dataclasses
-│   │   └── settings.py
-│   ├── data/                 # Binance REST client
-│   │   ├── binance_fetcher.py
-│   │   └── dataset.py        # Causal sliding-window dataset
-│   ├── features/             # Feature engineering modules
-│   │   ├── liquidity.py
-│   │   └── orderbook.py
-│   ├── models/               # Hermite neural network definition
-│   │   └── hermite.py
-│   ├── eval/                 # Offline evaluation helpers
-│   │   └── evaluate.py
-│   └── pipeline/             # Training utilities
-│       └── training.py
+│   ├── __init__.py             # Runtime environment guards (OpenMP-safe defaults)
+│   ├── config/
+│   │   ├── defaults.yaml       # YAML configuration with data/model/eval defaults
+│   │   └── settings.py         # Dataclasses + loaders
+│   ├── data/
+│   │   ├── binance_fetcher.py  # REST client (synthetic-safe fallbacks)
+│   │   └── dataset.py          # Stationary, windowed dataset builder
+│   ├── eval/
+│   │   ├── conformal.py        # Quantiles and p-values
+│   │   ├── diagnostics.py      # Statistical tests and calibration metrics
+│   │   └── strategy.py         # Threshold policy back-test
+│   ├── features/
+│   │   ├── stationary.py       # Leak-safe feature engineering
+│   │   ├── liquidity.py        # Time-aligned liquidity proxies
+│   │   └── orderbook.py        # Order-book proxies
+│   ├── models/hermite.py       # Probabilistic Hermite forecaster
+│   ├── pipeline/
+│   │   ├── scaler.py           # Leak-guarded standardiser
+│   │   ├── split.py            # ROCV splitter
+│   │   └── training.py         # End-to-end training + diagnostics
+│   └── reporting/plots.py      # Reliability diagram helper
+└── tests/                      # Pytest suite (synthetic coverage)
 ```
 
-Configuration values such as symbol, intervals, network hyper-parameters, and feature engineering controls are defined in `src/config/settings.py` and can be adjusted from a single location.
+---
 
-## Environment setup
+## Environment
 
-### Conda workflow (recommended)
+PyTorch, NumPy, and SciPy run CPU-only by default; CUDA is optional.
 
 ```bash
-conda create -n hermite-nn python=3.10 -y
-conda activate hermite-nn
-# Install PyTorch with CUDA support (includes drivers for RTX 2060-class GPUs)
-conda install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia -y
-conda install numpy pandas requests scipy plotly streamlit -y
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install torch numpy pandas scipy matplotlib requests pyyaml pytest
 ```
 
-If you already maintain a CUDA-enabled PyTorch installation, you only need to ensure that the environment exposes the `torch` package compiled with GPU support.
-
-### pip workflow
+To avoid Intel OpenMP shared-memory issues on restricted systems, ensure the following variables are exported before running any scripts (the package sets these automatically when imported):
 
 ```bash
-pip install numpy pandas requests scipy torch plotly streamlit --extra-index-url https://download.pytorch.org/whl/cu118
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MKL_THREADING_LAYER=GNU
+export KMP_AFFINITY=disabled
+export KMP_INIT_AT_FORK=FALSE
 ```
 
-The `--extra-index-url` flag fetches the GPU-enabled wheels (compatible with RTX 2060) from the official PyTorch repository.
+---
 
-### Troubleshooting PyTorch import errors
+## Configuration
 
-If importing PyTorch fails with an error similar to:
+Default hyper-parameters live in `src/config/defaults.yaml` and are loaded into structured dataclasses. The key sections are:
 
-```
-ImportError: .../libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
-```
+| Section     | Highlights                                                                                  |
+|-------------|----------------------------------------------------------------------------------------------|
+| `binance`   | symbol, interval, history limit, REST endpoints                                             |
+| `data`      | window length, forecast horizon, validation split, stationary feature windows, extras flag  |
+| `features`  | liquidity/order-book proxy parameters                                                       |
+| `model`     | Hermite block size, degree, maps, dropout                                                   |
+| `training`  | batch size, epochs, LR, optimiser, scheduler, gradient clip, BCE weight, LR range test flag |
+| `evaluation`| alpha, ROCV folds, validation block size, threshold τ, per-trade cost, Markdown toggle      |
+| `reporting` | output directory, legend metadata                                                           |
 
-the environment is missing Intel's JIT profiling symbols that ship with the
-`intel-openmp` runtime. This typically occurs when a conda environment upgrades
-`torch` without pulling the matching OpenMP dependency, leaving an older
-`libiomp5.so` on the search path. Fix the issue by reinstalling the Intel
-runtime in the active environment:
+Override any subset by:
 
 ```bash
-conda install intel-openmp -y
-# or, if you prefer conda-forge packages
-conda install -c conda-forge libiomp -y
+python main.py --config my_experiment.yaml
 ```
 
-After reinstalling, restart the shell so the loader picks up the refreshed
-library. Alternatively, reinstalling PyTorch with matching channels (e.g.
-`conda install pytorch pytorch-cuda=11.8 -c pytorch -c nvidia -y`) brings the
-correct dependency set back in place.
+CLI flags supersede YAML:
 
-## Usage
+| Flag            | Meaning                                        |
+|-----------------|------------------------------------------------|
+| `--cv`          | Enable ROCV (expanding folds) instead of single split |
+| `--alpha`       | Override conformal miscoverage level (default 0.1)    |
+| `--threshold`   | Trading threshold τ for strategy evaluation           |
+| `--cost-bps`    | Transaction cost per trade (basis points)             |
+| `--save-md/--no-save-md` | Toggle Markdown report output                |
+| `--seed`        | Deterministic seed override                           |
+| `--results-dir` | Custom directory for reports and diagnostics          |
 
-Run the training pipeline with:
+---
+
+## Running training
+
+### Single chronological split
 
 ```bash
-python main.py
+python main.py --results-dir reports/run_single
 ```
 
-The script will:
-
-1. Download the latest 3,000 hourly BTCUSDT futures candles from Binance.
-2. Build the liquidity-map and order-book feature sets.
-3. Assemble a sliding-window dataset, split it into training/validation subsets, and train the Hermite neural network.
-4. Print the predicted price for the next hourly close.
-
-The pipeline automatically stores a reproducible checkpoint under
-`artifacts/hermite_forecaster.pt` (configurable via `--save`). The checkpoint
-includes the model weights, optimiser state, feature list, train-only scaler
-statistics, and the train/validation timestamp ranges.
-
-### Interactive control panel
-
-To manipulate data-source parameters, training hyper-parameters, and plot the historical vs. predicted prices, launch the Streamlit interface:
+### Rolling-origin cross-validation (5 folds by default)
 
 ```bash
-streamlit run src/interface/app.py
+python main.py --cv --results-dir reports/run_rocv
 ```
 
-The left-hand panel exposes Binance symbol, interval, look-back size, and
-Hermite NN hyper-parameters. Set the forecast horizon slider to any integer
-between 1 and 15 hours to control how far ahead the network predicts. After
-clicking **Start training**, the right-hand side renders the loss curves
-together with historical candles, observed futures closes, the model's
-forecasts, and the running average absolute error across the last ten
-validation predictions (also displayed directly on the chart).
+During each run the trainer:
 
-## Training and validation process
+1. Builds leak-safe stationary features:
+   - `log_ret_close`, `hl_range`, `oc_gap`, train-only z-scored volume inside the window.
+   - Rolling context (means/stds, autocorr, drawdown) and day-of-week one-hot.
+   - Optional time-aligned liquidity/order-book extras when `data.use_extras` is true.
+2. Splits chronologically and applies a leak-guarded scaler (raises if future indices leak into the fit slice).
+3. Trains the probabilistic Hermite forecaster with Gaussian NLL + λ·BCE (configurable λ).
+4. Applies dropout, weight decay, and gradient clipping; restores the best checkpoint via early stopping.
+5. Reserves a calibration tail from each train fold, computes conformal quantiles, intervals, and p-values.
+6. Logs calibrated diagnostics, probabilistic calibration, strategy metrics, and baseline comparisons.
 
-The pipeline trains through `src/pipeline/training.py` and follows these steps:
+Per-epoch logs include total loss, Gaussian NLL, classification BCE, Brier score, and the instantaneous learning rate; training halts early if any loss becomes non-finite or explodes beyond a safe threshold.
 
-1. **Dataset preparation** – constructs causal OHLCV windows and appends
-   liquidity/order-book summaries without performing any in-place
-   normalisation.
-2. **Chronological split** – keeps the earliest samples for training and
-   reserves the last `validation_split` fraction for validation. The train/val
-   timestamp ranges are printed to stdout for every run.
-3. **GPU-aware execution** – automatically selects an NVIDIA RTX 2060 if
-   present (`TrainingConfig.device_preference`). When unavailable, it falls
-   back to the next CUDA device or CPU.
-4. **Robust optimisation** – trains with the Huber loss (`delta=1e-3`) and
-   clips gradients to `max_norm=1.0` for stability.
-5. **Price-space validation** – after each epoch, reports the validation Huber
-   loss, and after training computes MAE, RMSE, MAPE, median APE, and the mean
-   absolute error over the last 10 validation predictions in price units.
+---
 
-Example console snippet:
+## Outputs
 
+Every run produces:
+
+- **Results CSV** `reports/results_<timestamp>.csv` – fold-aggregated metrics (`mean±std` when multiple folds).
+- **Markdown report** *(optional)* mirroring the CSV plus a legend for every abbreviation.
+- **Reliability diagrams** (raw + calibrated) saved per fold under `<results-dir>/plots/reliability_{raw|calibrated}_fold_{k}.png`.
+- **LR range plot** `lr_range_fold_{k}.png` when `training.enable_lr_range_test` is enabled to visualise loss response vs learning rate.
+- **Structured logs** (JSON) summarising device selection, fold hashes, and seeds.
+
+### Learning-rate range test
+
+To explore stable learning rates, enable the built-in LR sweep in a YAML override:
+
+```yaml
+training:
+  enable_lr_range_test: true
+  lr_range_min: 1.0e-5
+  lr_range_max: 5.0e-2
+  lr_range_steps: 60
 ```
-Setting deterministic seed: 42
-Train period: 2023-01-01T00:00:00+00:00 -> 2023-04-01T23:00:00+00:00 (1672531200000 -> 1680390000000)
-Validation period: 2023-04-02T00:00:00+00:00 -> 2023-04-30T23:00:00+00:00 (1680393600000 -> 1682895600000)
-Epoch 1/10 - Train Huber: 0.00001234 - Val Huber: 0.00002157
-...
-Validation price metrics -> MAE: 15.238401, RMSE: 22.719076, MAPE: 0.4123% , Median APE: 0.3011%, Avg abs err last 10: 11.904200
-Checkpoint saved to artifacts/hermite_forecaster.pt
-```
 
-These metrics are mirrored in the Streamlit dashboard and stored with the
-checkpoint for downstream evaluation.
+The trainer will perform a single pass (fold 0) across exponentially spaced LRs and emit `plots/lr_range_fold_0.png`, plotting loss against LR on a log scale.
 
-### Offline evaluation and inference
+Key columns in the results table:
 
-Use the dedicated scripts to analyse or deploy trained checkpoints:
+- Return/price errors: `MAE_return`, `RMSE_return`, `MAE_price`, `sMAPE_price`.
+- Classification diagnostics: `DirAcc`, `Binom_p`, `Brier`, `AUC`, `ECE`.
+- Statistical tests: `DM_p_SE`, `DM_p_AE`, `MZ_intercept`, `MZ_slope`, `MZ_F_p`, `Runs_p`, `LjungBox_p`.
+- Conformal metrics: `Conf_Coverage@X%`, `Conf_Width@X%`, per-prediction p-values in the detailed forecast frame.
+- Strategy evaluation: `Sharpe_strategy`, `MDD_strategy`, `Turnover`, plus `Sharpe_naive_long` and `Sharpe_naive_flat`.
+
+The Markdown file ends with a legend explaining every abbreviation (p_up, DM, MZ, ECE, etc.).
+
+---
+
+## Probabilistic diagnostics
+
+- **Gaussian mean/variance head** for heteroscedastic NLL.
+- **`p_up` head** calibrated through BCE with configurable weight.
+- **Conformal calibration**:
+  - Symmetric absolute residual quantiles on calibration slices.
+  - Per-prediction p-values via empirical conformal scores.
+  - Coverage and width reporting in both return and price space.
+- **Randomness vs skill tests**:
+  - Exact two-sided binomial sign test.
+  - Diebold–Mariano vs zero-return baseline (squared/absolute loss).
+  - Mincer–Zarnowitz regression with joint F-test (converted to χ² for q=2).
+  - Runs test for residual sign patterns.
+  - Ljung–Box statistic on residual autocorrelation.
+- **Probability calibration metrics**:
+  - Brier score, ROC AUC, expected calibration error (ECE).
+  - Reliability diagrams (saved per fold).
+- **Strategy evaluation**:
+  - Threshold-based long/short/flat policy with costs, annualised Sharpe, max drawdown, hit rate, turnover.
+  - Always-long and always-flat baselines.
+
+---
+
+## Testing
+
+Run the suite (set OpenMP variables if your system restricts shared memory):
 
 ```bash
-# Evaluate the validation slice recorded in the checkpoint
-python -m src.eval.evaluate artifacts/hermite_forecaster.pt --csv-output reports/val_predictions.csv
-
-# Run inference on your own candle history
-python inference.py --ckpt artifacts/hermite_forecaster.pt --csv path/to/latest_candles.csv
+pytest
 ```
 
-The evaluation utility reloads the saved scalers, reconstructs validation price
-predictions, and prints the MAE/RMSE/MAPE/median APE metrics while optionally
-writing a detailed CSV report. The inference helper expects a CSV with at least
-`open,high,low,close,volume,close_time` columns and outputs both the predicted
-log-return and price at the configured horizon.
+Highlights:
 
-## Extending the project
+- Dataset / scaler guards (no future leakage, non-zero variance, zero-mean stationary returns).
+- Probabilistic head sanity (tensor shapes, finite NLL).
+- Conformal coverage on synthetic noise.
+- Diebold–Mariano, runs, Ljung–Box, and calibration metrics regression tests.
+- End-to-end synthetic smoke test executed in a subprocess, skipping automatically when the host disallows Intel OpenMP shared memory (common in sandboxed CI).
 
-* Update `FeatureConfig` or `TrainingConfig` in `src/config/settings.py` to change look-back windows, Hermite polynomial degree, or optimisation hyper-parameters.
-* Implement additional feature transforms by adding new modules under `src/features/` and combining them within the training pipeline.
-* Swap the Binance REST client with a websocket-driven data source by extending `src/data/binance_fetcher.py`.
+---
 
-## Disclaimer
+## Notes
 
-This repository is intended for research and educational purposes. Cryptocurrency markets are highly volatile; no warranty is provided regarding the performance of the forecasts.
+- The codebase defaults to CPU execution and caps BLAS threads to one to remain reproducible across constrained environments.
+- Liquidity/order-book extras are optional; if real historical series are unavailable, keep `data.use_extras: false`.
+- When running on machines with sparse `/dev/shm`, export the environment variables shown earlier to avoid Intel OpenMP crashes.
+
+For questions or improvement ideas (e.g. SPA test variants, alternative benchmarks, or additional diagnostics), open an issue or submit a pull request. Contributions welcome!

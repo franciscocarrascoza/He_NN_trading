@@ -1,96 +1,108 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+import json
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 
-import torch
-
-from src.config import BINANCE, TRAINING, BinanceAPIConfig, TrainingConfig
-from src.data import BinanceDataFetcher
+from src.config import APP_CONFIG, AppConfig, load_config
 from src.pipeline import HermiteTrainer
+from src.pipeline.split import RollingOriginSplitter
+from src.utils.logging import configure_logging
+from src.utils.repo import forecast_horizon_owner, label_factory_location
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Hermite NN forecaster for BTCUSDT")
+    parser = argparse.ArgumentParser(description="Train probabilistic Hermite forecaster with diagnostics.")
+    parser.add_argument("--config", type=Path, default=None, help="Optional path to YAML config overrides.")
+    parser.add_argument("--cv", action="store_true", help="Enable rolling-origin cross-validation.")
+    parser.add_argument("--alpha", type=float, default=None, help="Override conformal alpha (e.g. 0.1).")
+    parser.add_argument("--threshold", type=float, default=None, help="Override trading threshold τ.")
+    parser.add_argument("--cost-bps", type=float, default=None, help="Override transaction cost per trade in basis points.")
+    parser.add_argument("--seed", type=int, default=None, help="Override random seed.")
     parser.add_argument(
-        "--save",
-        type=Path,
+        "--save-md",
+        action=argparse.BooleanOptionalAction,
         default=None,
-        help="Optional path to save the training checkpoint (overrides config).",
+        help="Enable or disable saving Markdown results alongside CSV.",
     )
-    parser.add_argument("--symbol", type=str, default=None, help="Override the Binance trading pair symbol (e.g. BTCUSDT).")
-    parser.add_argument("--interval", type=str, default=None, help="Override the Binance kline interval (e.g. 1h).")
-    parser.add_argument("--history-limit", type=int, default=None, help="Number of historical candles to download (<=5000).")
+    parser.add_argument("--results-dir", type=Path, default=None, help="Directory to store results table outputs.")
     parser.add_argument(
-        "--forecast-horizon",
-        type=int,
-        default=None,
-        help="Number of candles ahead to predict (1-15).",
-    )
-    parser.add_argument("--batch-size", type=int, default=None, help="Mini-batch size for training.")
-    parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate for the optimiser.")
-    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs.")
-    parser.add_argument(
-        "--device-preference",
-        type=str,
-        default=None,
-        help="Preferred CUDA device name substring (e.g. RTX 2060).",
+        "--print-config",
+        action="store_true",
+        help="Print the effective configuration and data split indices, then exit.",
     )
     return parser.parse_args()
 
 
+def apply_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
+    cfg = config
+    if args.seed is not None:
+        cfg = replace(cfg, training=replace(cfg.training, seed=args.seed))
+    if args.alpha is not None:
+        cfg = replace(cfg, evaluation=replace(cfg.evaluation, alpha=args.alpha))
+    if args.threshold is not None:
+        cfg = replace(cfg, evaluation=replace(cfg.evaluation, threshold=args.threshold))
+    if args.cost_bps is not None:
+        cfg = replace(cfg, evaluation=replace(cfg.evaluation, cost_bps=args.cost_bps))
+    if args.save_md is not None:
+        cfg = replace(cfg, evaluation=replace(cfg.evaluation, save_markdown=args.save_md))
+    return cfg
+
+
+def _json_default(obj: object) -> object:
+    if isinstance(obj, Path):
+        return str(obj)
+    if is_dataclass(obj):
+        return asdict(obj)
+    if isinstance(obj, set):
+        return list(obj)
+    return str(obj)
+
+
 def main() -> None:
     args = parse_args()
-    binance_config: BinanceAPIConfig = BINANCE
-    training_config: TrainingConfig = TRAINING
+    base_config = load_config(args.config) if args.config else APP_CONFIG
+    config = apply_overrides(base_config, args)
+    configure_logging(config.logging.level)
 
-    if any(value is not None for value in (args.symbol, args.interval, args.history_limit)):
-        binance_config = replace(
-            binance_config,
-            symbol=args.symbol or binance_config.symbol,
-            interval=args.interval or binance_config.interval,
-            history_limit=args.history_limit or binance_config.history_limit,
+    if args.print_config:
+        trainer = HermiteTrainer(config=config)
+        dataset = trainer.prepare_dataset()
+        splitter = RollingOriginSplitter(
+            dataset_length=len(dataset),
+            data_config=config.data,
+            evaluation_config=config.evaluation,
         )
+        folds = splitter.split(use_cv=args.cv)
+        split_payload = [
+            {
+                "fold_id": fold.fold_id,
+                "train_idx": fold.train_idx.tolist(),
+                "calibration_idx": fold.calibration_idx.tolist(),
+                "val_idx": fold.val_idx.tolist(),
+                "scaler_idx": fold.scaler_idx.tolist(),
+            }
+            for fold in folds
+        ]
+        payload = {
+            "config": asdict(config),
+            "forecast_horizon_owner": forecast_horizon_owner(config),
+            "label_factory": label_factory_location(),
+            "num_samples": len(dataset),
+            "folds": split_payload,
+        }
+        print(json.dumps(payload, indent=2, default=_json_default))
+        return
 
-    if args.forecast_horizon is not None:
-        if not 1 <= args.forecast_horizon <= 15:
-            raise ValueError("--forecast-horizon must be between 1 and 15 inclusive.")
-        training_config = replace(training_config, forecast_horizon=args.forecast_horizon)
+    trainer = HermiteTrainer(config=config)
+    artifacts = trainer.run(use_cv=args.cv, results_dir=args.results_dir)
 
-    if args.batch_size is not None:
-        training_config = replace(training_config, batch_size=args.batch_size)
-    if args.learning_rate is not None:
-        training_config = replace(training_config, learning_rate=args.learning_rate)
-    if args.epochs is not None:
-        training_config = replace(training_config, num_epochs=args.epochs)
-    if args.device_preference is not None:
-        training_config = replace(training_config, device_preference=args.device_preference)
-
-    if args.save is not None:
-        training_config = replace(training_config, checkpoint_path=str(args.save))
-
-    fetcher = BinanceDataFetcher(binance_config)
-    trainer = HermiteTrainer(fetcher, training_config=training_config)
-    artifacts = trainer.train()
-    print(f"Training device: {artifacts.device}")
-    if artifacts.training_losses:
-        print(
-            f"Final Huber losses -> Train: {artifacts.training_losses[-1]:.6f}, "
-            f"Validation: {artifacts.validation_losses[-1]:.6f}"
-        )
-    metrics = artifacts.price_metrics
-    print(
-        "Validation price metrics -> "
-        f"MAE: {metrics.mae:.6f}, RMSE: {metrics.rmse:.6f}, MAPE: {metrics.mape:.4f}% "
-        f"Median APE: {metrics.median_ape:.4f}%"
-    )
-    print(
-        f"Average absolute error (last 10 val predictions): {metrics.avg_abs_err_last_10:.6f}"
-    )
-    print(f"Checkpoint stored at: {artifacts.checkpoint_path}")
-    next_price = trainer.predict_next_price(artifacts)
-    print(f"Predicted next price: {next_price:.2f} USDT")
+    print("Folds trained:", len(artifacts.fold_results))
+    if artifacts.csv_path:
+        print(f"Results CSV: {artifacts.csv_path}")
+    if artifacts.markdown_path:
+        print(f"Results Markdown: {artifacts.markdown_path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,76 @@
+binance:
+  symbol: BTCUSDT
+  interval: 1h
+  history_limit: 1500
+  max_klines_per_request: 1500
+  futures_base_url: https://fapi.binance.com
+  spot_base_url: https://api.binance.com
+  order_book_limit: 100
+  long_short_period: 5m
+  liquidation_bins: 200
+  liquidation_price_range: 0.75
+
+data:
+  feature_window: 64
+  forecast_horizon: 1
+  validation_split: 0.2
+  use_extras: false
+  extras_time_aligned: false
+  momentum_windows: [8, 24, 64]
+  volatility_windows: [8, 24, 64]
+  autocorr_window: 32
+  drawdown_window: 64
+
+features:
+  liquidity_bins: 180
+  liquidity_price_range: 0.6
+  liquidity_smoothing_sigma: 5.0
+  liquidity_top_k: 10
+  order_book_depth: 20
+
+model:
+  hermite_degree: 5
+  hermite_maps_a: 2
+  hermite_maps_b: 2
+  hermite_hidden_dim: 64
+  dropout: 0.1
+
+training:
+  batch_size: 64
+  learning_rate: 0.001
+  num_epochs: 25
+  weight_decay: 1.0e-5
+  gradient_clip: 1.0
+  lambda_bce: 0.25
+  early_stopping_patience: 5
+  seed: 42
+  device_preference: RTX 2060
+  classification_loss: bce
+  auto_pos_weight: true
+  focal_gamma: 2.0
+  min_pos_weight_samples: 128
+  optimizer: adamw
+  scheduler: onecycle
+  scheduler_warmup_pct: 0.1
+  enable_lr_range_test: false
+  lr_range_min: 1.0e-5
+  lr_range_max: 0.1
+  lr_range_steps: 60
+  enable_class_downsample: false
+
+evaluation:
+  alpha: 0.1
+  cv_folds: 5
+  val_block: 128
+  calibration_fraction: 0.1
+  threshold: 0.55
+  cost_bps: 5.0
+  save_markdown: true
+
+reporting:
+  output_dir: reports
+  legend_title: "Legend"
+  date_format: "%Y-%m-%d"
+
+logging:
+  level: INFO

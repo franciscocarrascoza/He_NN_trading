@@ -1,3 +1,3 @@
-from .training import HermiteTrainer, PriceMetrics, TrainingArtifacts
+from .training import FoldResult, HermiteTrainer, TrainingArtifacts
 
-__all__ = ["HermiteTrainer", "TrainingArtifacts", "PriceMetrics"]
+__all__ = ["HermiteTrainer", "TrainingArtifacts", "FoldResult"]

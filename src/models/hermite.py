@@ -5,7 +5,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
-from src.config import TRAINING, TrainingConfig
+from src.config import MODEL, ModelConfig
 
 
 def hermite_polynomials(z: torch.Tensor, degree: int, *, physicist: bool = False) -> torch.Tensor:
@@ -100,41 +100,53 @@ class SymmetricHermiteBlock(nn.Module):
 
 
 class HermiteForecaster(nn.Module):
-    """Compact neural network that consumes engineered features and forecasts price."""
-
+    """Probabilistic Hermite forecaster with mean/variance and classification heads."""
     def __init__(
         self,
         input_dim: int,
-        config: TrainingConfig = TRAINING,
+        *,
+        model_config: ModelConfig = MODEL,
     ) -> None:
         super().__init__()
         self.block = SymmetricHermiteBlock(
             input_dim=input_dim,
-            hidden_dim=config.hermite_hidden_dim,
-            degree=config.hermite_degree,
-            maps_a=config.hermite_maps_a,
-            maps_b=config.hermite_maps_b,
+            hidden_dim=model_config.hermite_hidden_dim,
+            degree=model_config.hermite_degree,
+            maps_a=model_config.hermite_maps_a,
+            maps_b=model_config.hermite_maps_b,
         )
         feature_dim = input_dim + input_dim + 1
-        self.regression_head = nn.Sequential(
-            nn.Linear(feature_dim, config.hermite_hidden_dim),
-            nn.LayerNorm(config.hermite_hidden_dim),
+        hidden = model_config.hermite_hidden_dim
+        dropout = model_config.dropout
+
+        self.pre_head = nn.Sequential(
+            nn.Linear(feature_dim, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
-            nn.Linear(config.hermite_hidden_dim, 1),
-        )
-        self.direction_head = nn.Sequential(
-            nn.Linear(feature_dim, config.hermite_hidden_dim),
-            nn.LayerNorm(config.hermite_hidden_dim),
-            nn.GELU(),
-            nn.Linear(config.hermite_hidden_dim, 1),
+            nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        def _make_head() -> nn.Sequential:
+            return nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, 1),
+            )
+
+        self.mu_head = _make_head()
+        self.logvar_head = _make_head()
+        self.logit_head = _make_head()
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         symmetric_features, jacobian_trace = self.block(x)
         features = torch.cat([x, symmetric_features, jacobian_trace], dim=-1)
-        pred_log_return = self.regression_head(features)
-        direction_logits = self.direction_head(features)
-        return pred_log_return, direction_logits
+        shared = self.pre_head(features)
+        mu = self.mu_head(shared)
+        logvar = self.logvar_head(shared)
+        logits = self.logit_head(shared)
+        p_up = torch.sigmoid(logits)
+        return mu, logvar, p_up, logits
 
 
 __all__ = [
