@@ -1,0 +1,67 @@
+Inputs (x₁, x₂, …, x_d) x ∈ ℝ^d (column vector of stationary features; no explicit bias) 
+⟶ Linear maps (weight matrices): zᵢ = Aᵢ x , zⱼ = Bⱼ x 
+- Aᵢ ∈ ℝ^(m × d), Bⱼ ∈ ℝ^(m × d) (learnable weights; multiple A_i maps and B_j maps per config) 
+- zᵢ , zⱼ ∈ ℝ^m (projection vectors) 
+⬇ 
+⟶ Activation: h(z) = Σₙ₌₀ᴺ cₙ · Heₙ(z) + d₀ + d₁ z 
+- z ∈ ℝ^m (input vector) 
+- Heₙ(z) ∈ ℝ^m (elementwise Hermite polynomial of degree n; probabilist or physicist version per config) 
+- cₙ ∈ ℝ^(N+1) (learnable or fixed coefficients; initialized as randn * 0.1) 
+- d₀ ∈ ℝ (scalar bias term), d₁ ∈ ℝ (scalar linear coefficient) 
+- h(z) ∈ ℝ^m (activated vector) 
+│ ▲ ▲ 
+│ │ └── affine term (d₀ + d₁ z) ∈ ℝ^m 
+│ │ 
+│ └── Hermite basis Heₙ(z) evaluated elementwise at z 
+│ 
+└── coefficients cₙ (scalars; learnable per activation instance) 
+  Coefficient estimation (optional offline quadrature; not used in learned mode): 
+  cₙ ≈ Σₖ wₖ ψ(xₖ) Heₙ(xₖ) 
+  - xₖ ∈ ℝ (fixed quadrature nodes) 
+  - Heₙ(xₖ) ∈ ℝ (scalar) 
+  - ψ(xₖ) ∈ ℝ (weight function evaluation, e.g., Gaussian) 
+  - wₖ ∈ ℝ (quadrature weight) 
+  - cₙ ∈ ℝ (scalar approximation) 
+⬇ 
+⟶ Symmetric feature transformation: F(x) = Σᵢ Aᵢᵀ h(Aᵢ x) − Σⱼ Bⱼᵀ h(Bⱼ x) + b 
+- x ∈ ℝ^d (input feature vector) 
+- Aᵢ x , Bⱼ x ∈ ℝ^m 
+- h(Aᵢ x), h(Bⱼ x) ∈ ℝ^m 
+- Aᵢᵀ h(Aᵢ x) ∈ ℝ^d , Bⱼᵀ h(Bⱼ x) ∈ ℝ^d 
+- b ∈ ℝ^d (learnable bias vector) 
+- F(x) ∈ ℝ^d (transformed symmetric features) 
+⬇ 
+⟶ Jacobian trace (sensitivity proxy): Tr(J(x)) ≈ Σᵢ (Aᵢ row_norms²) · h′(Aᵢ x) − Σⱼ (Bⱼ row_norms²) · h′(Bⱼ x) 
+- h′(z) = Σₙ₌₁ᴺ n · cₙ · He_{n-1}(z) + d₁ (elementwise derivative) 
+- row_norms² = (Aᵢ.weight²).sum(dim=1) ∈ ℝ^m 
+- Tr(J(x)) ∈ ℝ (scalar trace of approximate Jacobian; used as feature) 
+- J(x) ≈ Σᵢ Aᵢᵀ · diag(h′(Aᵢ x)) · Aᵢ − Σⱼ Bⱼᵀ · diag(h′(Bⱼ x)) · Bⱼ ∈ ℝ^(d × d) (full Jacobian not computed; trace only) 
+⬇ 
+⟶ Feature concatenation: φ = [x ; F(x) ; Tr(J(x))] 
+- x ∈ ℝ^d , F(x) ∈ ℝ^d , Tr(J(x)) ∈ ℝ^1 
+- φ ∈ ℝ^(2d + 1) (combined input, symmetric, and sensitivity features) 
+⬇ 
+⟶ Shared pre-head (MLP stem): 
+  Linear(2d+1 → h) → LayerNorm(h) → GELU → Dropout(p) 
+- h = hidden_dim (per config) 
+- p = dropout rate (per config) 
+- Output: shared ∈ ℝ^h (processed features) 
+⬇ 
+⟶ Probabilistic heads (parallel branches): 
+  Each head: Linear(h → h) → GELU → Dropout(p) → Linear(h → 1) 
+  - μ_head: ŷ_μ = μ_head(shared) ∈ ℝ (predicted mean log-return) 
+  - logvar_head: ŷ_σ² = logvar_head(shared) ∈ ℝ (predicted log-variance for uncertainty) 
+  - logit_head: logits = logit_head(shared) ∈ ℝ (binary logit for direction) 
+  ⟶ p_up = sigmoid(logits) ∈ [0,1] (probability of positive return; raw or calibrated) 
+  Optional enhanced p_up (via Gaussian CDF; not in base code but suggested fix): 
+  p_up ≈ Φ(μ / √(exp(logvar))) = 0.5 * (1 + erf(μ / √(2 * exp(logvar)))) 
+  - Φ: standard normal CDF 
+  - erf: error function (elementwise) 
+⬇ 
+⟶ Outputs: (ŷ_μ, ŷ_σ², p_up, logits) 
+- Used for: regression (ŷ_μ), uncertainty (ŷ_σ² for conformal intervals), classification (p_up for direction/strategy) 
+- Training losses: Huber(ŷ_μ, target) + NLL(ŷ_μ, ŷ_σ², target) + BCE(logits, dir_label) 
+- Evaluation: pred_logret = ŷ_μ, direction_probs = p_up (calibrated via Platt/Isotonic on cal set) 
+  Conformal: residuals from cal set → quantile q_α 
+  Interval: [ŷ_μ - q_α, ŷ_μ + q_α] (for coverage/width) 
+  Strategy: positions if p_up > threshold (e.g., 0.55); Kelly: (2*p_up - 1) clipped [-1,1]

@@ -27,6 +27,8 @@ features:
   liquidity_smoothing_sigma: 5.0
   liquidity_top_k: 10
   order_book_depth: 20
+  add_ema: true
+  ema_windows: [6, 12, 24]
 
 model:
   hermite_degree: 5
@@ -34,6 +36,10 @@ model:
   hermite_maps_b: 2
   hermite_hidden_dim: 64
   dropout: 0.1
+  use_lstm: true
+  lstm_hidden: 64
+  hermite_version: probabilist
+  prob_source: cdf
 
 training:
   batch_size: 64
@@ -42,7 +48,6 @@ training:
   weight_decay: 1.0e-5
   gradient_clip: 1.0
   lambda_bce: 0.25
-  early_stopping_patience: 5
   seed: 42
   device_preference: RTX 2060
   classification_loss: bce
@@ -57,6 +62,15 @@ training:
   lr_range_max: 0.1
   lr_range_steps: 60
   enable_class_downsample: false
+  reg_weight: 1.0
+  cls_weight: 1.0
+  unc_weight: 0.5
+  sign_hinge_weight: 0.05
+  use_cv: true
+  cv_folds: 5
+  early_stop_metric: AUC
+  patience: 10
+  min_delta: 0.0001
 
 evaluation:
   alpha: 0.1
@@ -66,6 +80,14 @@ evaluation:
   threshold: 0.55
   cost_bps: 5.0
   save_markdown: true
+  n_bins: 15
+
+strategy:
+  thresholds: [0.55, 0.6]
+  confidence_margin: 0.1
+  kelly_clip: 0.5
+  use_conformal_gate: true
+  conformal_p_min: 0.05
 
 reporting:
   output_dir: reports

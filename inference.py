@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from src.config import TRAINING, TrainingConfig
+from src.config import MODEL, TRAINING, TrainingConfig
 from src.data.dataset import HermiteDataset
 from src.features import (
     compute_causal_features,
@@ -122,7 +122,12 @@ def main() -> None:
         training_config = replace(training_config, forecast_horizon=args.horizon)
 
     input_dim = int(checkpoint["feature_mean"].shape[0])
-    model = HermiteForecaster(input_dim=input_dim, config=training_config)
+    model = HermiteForecaster(
+        input_dim=input_dim,
+        model_config=MODEL,
+        feature_window=int(checkpoint["window"]),
+        window_feature_columns=HermiteDataset.window_feature_columns,
+    )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
 
@@ -172,9 +177,9 @@ def main() -> None:
     scaled_features = (feature_vector - feature_mean) / feature_std
 
     with torch.no_grad():
-        log_return_tensor, direction_logits = model(scaled_features.unsqueeze(0))
-        log_return = log_return_tensor.item()
-        direction_prob = torch.sigmoid(direction_logits).item()
+        output = model(scaled_features.unsqueeze(0))
+        log_return = output.mu.item()
+        direction_prob = output.probability(MODEL.prob_source).item()
 
     predicted_price = anchor_price * float(np.exp(log_return))
 

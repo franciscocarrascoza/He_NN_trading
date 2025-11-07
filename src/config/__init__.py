@@ -7,6 +7,7 @@ from .settings import (
     LOGGING,
     MODEL,
     REPORTING,
+    STRATEGY,
     TRAINING,
     AppConfig,
     BinanceAPIConfig,
@@ -16,6 +17,7 @@ from .settings import (
     LoggingConfig,
     ModelConfig,
     ReportingConfig,
+    StrategyConfig,
     TrainingConfig,
     load_config,
 )
@@ -29,6 +31,7 @@ __all__ = [
     "LOGGING",
     "MODEL",
     "REPORTING",
+    "STRATEGY",
     "TRAINING",
     "AppConfig",
     "BinanceAPIConfig",
@@ -38,6 +41,7 @@ __all__ = [
     "LoggingConfig",
     "ModelConfig",
     "ReportingConfig",
+    "StrategyConfig",
     "TrainingConfig",
     "load_config",
 ]

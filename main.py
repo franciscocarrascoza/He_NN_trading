@@ -15,11 +15,35 @@ from src.utils.repo import forecast_horizon_owner, label_factory_location
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train probabilistic Hermite forecaster with diagnostics.")
     parser.add_argument("--config", type=Path, default=None, help="Optional path to YAML config overrides.")
-    parser.add_argument("--cv", action="store_true", help="Enable rolling-origin cross-validation.")
+    parser.add_argument(
+        "--cv",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable rolling-origin cross-validation (defaults to config).",
+    )
     parser.add_argument("--alpha", type=float, default=None, help="Override conformal alpha (e.g. 0.1).")
     parser.add_argument("--threshold", type=float, default=None, help="Override trading threshold τ.")
     parser.add_argument("--cost-bps", type=float, default=None, help="Override transaction cost per trade in basis points.")
     parser.add_argument("--seed", type=int, default=None, help="Override random seed.")
+    parser.add_argument(
+        "--prob-source",
+        choices=["cdf", "logit"],
+        default=None,
+        help="Select probability head output (CDF of Gaussian or sigmoid logits).",
+    )
+    parser.add_argument(
+        "--use-lstm",
+        dest="use_lstm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable the temporal LSTM encoder regardless of config.",
+    )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=None,
+        help="Override the number of rolling-origin CV folds.",
+    )
     parser.add_argument(
         "--save-md",
         action=argparse.BooleanOptionalAction,
@@ -39,6 +63,12 @@ def apply_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
     cfg = config
     if args.seed is not None:
         cfg = replace(cfg, training=replace(cfg.training, seed=args.seed))
+    if args.prob_source is not None:
+        cfg = replace(cfg, model=replace(cfg.model, prob_source=args.prob_source))
+    if args.use_lstm is not None:
+        cfg = replace(cfg, model=replace(cfg.model, use_lstm=args.use_lstm))
+    if args.cv_folds is not None:
+        cfg = replace(cfg, training=replace(cfg.training, cv_folds=args.cv_folds))
     if args.alpha is not None:
         cfg = replace(cfg, evaluation=replace(cfg.evaluation, alpha=args.alpha))
     if args.threshold is not None:
@@ -74,7 +104,8 @@ def main() -> None:
             data_config=config.data,
             evaluation_config=config.evaluation,
         )
-        folds = splitter.split(use_cv=args.cv)
+        effective_use_cv = args.cv if args.cv is not None else config.training.use_cv
+        folds = splitter.split(use_cv=effective_use_cv)
         split_payload = [
             {
                 "fold_id": fold.fold_id,
@@ -103,6 +134,8 @@ def main() -> None:
         print(f"Results CSV: {artifacts.csv_path}")
     if artifacts.markdown_path:
         print(f"Results Markdown: {artifacts.markdown_path}")
+    if artifacts.summary_path:
+        print(f"Summary JSON: {artifacts.summary_path}")
 
 
 if __name__ == "__main__":

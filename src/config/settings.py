@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, MutableMapping, Tuple
+from typing import Any, Dict, Iterable, Literal, Mapping, MutableMapping, Tuple
 
 import yaml
 
@@ -58,6 +58,8 @@ class FeatureConfig:
     liquidity_smoothing_sigma: float
     liquidity_top_k: int
     order_book_depth: int
+    add_ema: bool = True
+    ema_windows: Tuple[int, ...] = field(default_factory=lambda: (6, 12, 24))
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,10 @@ class ModelConfig:
     hermite_maps_b: int
     hermite_hidden_dim: int
     dropout: float
+    use_lstm: bool = True
+    lstm_hidden: int = 64
+    hermite_version: str = "probabilist"
+    prob_source: Literal["cdf", "logit"] = "cdf"
 
 
 @dataclass(frozen=True)
@@ -77,7 +83,6 @@ class TrainingConfig:
     weight_decay: float
     gradient_clip: float
     lambda_bce: float
-    early_stopping_patience: int
     seed: int
     device_preference: str
     classification_loss: str = "bce"
@@ -92,6 +97,24 @@ class TrainingConfig:
     lr_range_max: float = 1e-1
     lr_range_steps: int = 60
     enable_class_downsample: bool = False
+    reg_weight: float = 1.0
+    cls_weight: float = 1.0
+    unc_weight: float = 0.5
+    sign_hinge_weight: float = 0.05
+    use_cv: bool = True
+    cv_folds: int = 5
+    early_stop_metric: Literal["AUC", "DirAcc"] = "AUC"
+    patience: int = 10
+    min_delta: float = 1e-4
+
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    thresholds: Tuple[float, ...] = field(default_factory=lambda: (0.55, 0.6))
+    confidence_margin: float = 0.1
+    kelly_clip: float = 0.5
+    use_conformal_gate: bool = True
+    conformal_p_min: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -103,6 +126,7 @@ class EvaluationConfig:
     threshold: float
     cost_bps: float
     save_markdown: bool
+    n_bins: int = 15
 
 
 @dataclass(frozen=True)
@@ -124,6 +148,7 @@ class AppConfig:
     features: FeatureConfig
     model: ModelConfig
     training: TrainingConfig
+    strategy: StrategyConfig
     evaluation: EvaluationConfig
     reporting: ReportingConfig
     logging: LoggingConfig
@@ -139,6 +164,7 @@ class AppConfig:
             evaluation = EvaluationConfig(**mapping["evaluation"])
             reporting = ReportingConfig(**mapping["reporting"])
             logging = LoggingConfig(**mapping.get("logging", {}))
+            strategy = StrategyConfig(**mapping["strategy"])
         except KeyError as exc:  # pragma: no cover - defensive
             raise KeyError(f"Missing required config section: {exc}") from exc
         return cls(
@@ -147,6 +173,7 @@ class AppConfig:
             features=features,
             model=model,
             training=training,
+            strategy=strategy,
             evaluation=evaluation,
             reporting=reporting,
             logging=logging,
@@ -177,6 +204,7 @@ TRAINING = APP_CONFIG.training
 EVALUATION = APP_CONFIG.evaluation
 REPORTING = APP_CONFIG.reporting
 LOGGING = APP_CONFIG.logging
+STRATEGY = APP_CONFIG.strategy
 
 __all__ = [
     "AppConfig",
@@ -193,6 +221,7 @@ __all__ = [
     "FeatureConfig",
     "ModelConfig",
     "TrainingConfig",
+    "StrategyConfig",
     "EvaluationConfig",
     "ReportingConfig",
     "LoggingConfig",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Streamlit dashboard for configuring and running the Hermite NN forecaster."""
+
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +21,7 @@ from src.config import (
     BINANCE,
     DATA,
     MODEL,
+    STRATEGY,
     TRAINING,
     AppConfig,
     BinanceAPIConfig,
@@ -65,10 +68,12 @@ def _render_fold_section(fold) -> None:
         st.warning(fold.calibration_warning)
     if fold.coverage_warning:
         st.warning(f"Conformal warning: {fold.coverage_warning}")
+    if getattr(fold, "predictions_path", None):
+        st.info(f"Predictions CSV: {fold.predictions_path}")
 
     metrics_df = pd.DataFrame([fold.metrics]).T.reset_index()
     metrics_df.columns = ["Metric", "Value"]
-    st.dataframe(metrics_df, use_container_width=True)
+    st.dataframe(metrics_df, width="stretch")
 
     reliability_cols = st.columns(2)
     raw_path = fold.reliability_paths.get("raw")
@@ -164,7 +169,32 @@ def _render_fold_section(fold) -> None:
             "conformal_p": "Conformal p-value",
         }
         st.subheader("Forecast table (head)")
-        st.dataframe(frame[display_columns].rename(columns=renamed).head(100), use_container_width=True)
+        st.dataframe(frame[display_columns].rename(columns=renamed).head(100), width="stretch")
+
+    st.subheader("Strategy summary")
+    strategy = getattr(fold, "strategy_metrics", None)
+    if strategy and strategy.threshold is not None:
+        active_msg = (
+            f" | Active {strategy.active_fraction * 100:.1f}%" if strategy.active_fraction is not None else ""
+        )
+        st.markdown(
+            f"Best threshold **{strategy.threshold:.2f}** | Sharpe **{strategy.sharpe:.3f}** | "
+            f"Turnover **{strategy.turnover:.3f}** | Hit-rate **{strategy.hit_rate:.3f}**{active_msg}"
+        )
+    runs = getattr(fold, "strategy_runs", None)
+    if runs:
+        rows = []
+        for thr, metrics in sorted(runs.items()):
+            rows.append(
+                {
+                    "Threshold": thr,
+                    "Sharpe": metrics.sharpe,
+                    "Turnover": metrics.turnover,
+                    "Hit-rate": metrics.hit_rate,
+                    "Active %": metrics.active_fraction * 100 if metrics.active_fraction is not None else None,
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), width="stretch")
 
 
 def run_app() -> None:
@@ -212,7 +242,22 @@ def run_app() -> None:
 
         st.header("Model hyper-parameters")
         model_col1, model_col2 = st.columns(2)
+        hermite_version_options = ["probabilist", "physicist"]
+        try:
+            hermite_version_idx = hermite_version_options.index(MODEL.hermite_version)
+        except ValueError:
+            hermite_version_idx = 0
+        prob_source_options = ["cdf", "logit"]
+        try:
+            prob_source_idx = prob_source_options.index(MODEL.prob_source)
+        except ValueError:
+            prob_source_idx = 0
         with model_col1:
+            hermite_version = st.selectbox(
+                "Hermite series type",
+                options=hermite_version_options,
+                index=hermite_version_idx,
+            )
             hermite_degree = st.number_input("Hermite degree", value=int(MODEL.hermite_degree), min_value=1, max_value=12)
             hermite_maps_a = st.number_input("Hermite maps A", value=int(MODEL.hermite_maps_a), min_value=1, max_value=8)
             hermite_hidden_dim = st.number_input(
@@ -221,6 +266,16 @@ def run_app() -> None:
         with model_col2:
             hermite_maps_b = st.number_input("Hermite maps B", value=int(MODEL.hermite_maps_b), min_value=1, max_value=8)
             dropout = st.slider("Dropout", min_value=0.0, max_value=0.5, value=float(MODEL.dropout), step=0.01)
+            prob_source = st.selectbox(
+                "Probability source",
+                options=prob_source_options,
+                index=prob_source_idx,
+                help="Use the return CDF or the classification logits for downstream probabilities.",
+            )
+        use_lstm = st.checkbox("Use LSTM temporal encoder", value=MODEL.use_lstm)
+        lstm_hidden = st.number_input(
+            "LSTM hidden units", value=int(MODEL.lstm_hidden), min_value=8, max_value=512, step=8
+        )
 
         st.header("Training hyper-parameters")
         train_col1, train_col2, train_col3 = st.columns(3)
@@ -241,9 +296,6 @@ def run_app() -> None:
         with train_col2:
             gradient_clip = st.number_input(
                 "Gradient clip", value=float(TRAINING.gradient_clip), min_value=0.1, max_value=10.0, step=0.1
-            )
-            lambda_bce = st.number_input(
-                "BCE weight λ", value=float(TRAINING.lambda_bce), min_value=0.0, max_value=1.0, step=0.01
             )
             optimizer = st.selectbox(
                 "Optimizer",
@@ -277,11 +329,80 @@ def run_app() -> None:
             min_pos_weight_samples = st.number_input(
                 "Min samples for class weight", value=int(TRAINING.min_pos_weight_samples), min_value=1, step=1
             )
-            early_stopping_patience = st.number_input(
-                "Early stopping patience", value=int(TRAINING.early_stopping_patience), min_value=0, max_value=200, step=1
+            early_stop_metric = st.selectbox(
+                "Early stop metric",
+                options=["AUC", "DirAcc"],
+                index=["AUC", "DirAcc"].index(TRAINING.early_stop_metric.upper()),
+            )
+            patience = st.number_input(
+                "Early stop patience", value=int(TRAINING.patience), min_value=0, max_value=500, step=1
+            )
+            min_delta = st.number_input(
+                "Early stop min delta",
+                value=float(TRAINING.min_delta),
+                min_value=0.0,
+                max_value=1.0,
+                step=0.0001,
+                format="%.5f",
             )
             seed = st.number_input("Random seed", value=int(TRAINING.seed), min_value=0, max_value=2**31 - 1)
             device_preference = st.text_input("Preferred CUDA device", value=TRAINING.device_preference)
+        lambda_bce = TRAINING.lambda_bce
+
+        weight_col1, weight_col2, weight_col3, weight_col4 = st.columns(4)
+        with weight_col1:
+            reg_weight = st.number_input(
+                "Reg weight", value=float(TRAINING.reg_weight), min_value=0.0, max_value=10.0, step=0.1
+            )
+        with weight_col2:
+            cls_weight = st.number_input(
+                "Cls weight", value=float(TRAINING.cls_weight), min_value=0.0, max_value=10.0, step=0.1
+            )
+        with weight_col3:
+            unc_weight = st.number_input(
+                "Unc weight", value=float(TRAINING.unc_weight), min_value=0.0, max_value=10.0, step=0.1
+            )
+        with weight_col4:
+            sign_hinge_weight = st.number_input(
+                "Sign hinge weight", value=float(TRAINING.sign_hinge_weight), min_value=0.0, max_value=1.0, step=0.01
+            )
+
+        st.header("Strategy hyper-parameters")
+        strat_col1, strat_col2 = st.columns(2)
+        default_thresholds = ", ".join(f"{val:.2f}" for val in STRATEGY.thresholds)
+        with strat_col1:
+            thresholds_text = st.text_input(
+                "Strategy thresholds (comma-separated)",
+                value=default_thresholds,
+                help="Enter probability cutoffs for entering long/short trades.",
+            )
+            strategy_confidence_margin = st.number_input(
+                "Confidence margin",
+                value=float(STRATEGY.confidence_margin),
+                min_value=0.0,
+                max_value=0.5,
+                step=0.01,
+            )
+            strategy_kelly_clip = st.number_input(
+                "Kelly clip",
+                value=float(STRATEGY.kelly_clip),
+                min_value=0.01,
+                max_value=1.0,
+                step=0.01,
+            )
+        with strat_col2:
+            strategy_use_conformal_gate = st.checkbox(
+                "Use conformal gate",
+                value=STRATEGY.use_conformal_gate,
+                help="Require conformal p-value to exceed a minimum before trading.",
+            )
+            strategy_conformal_p_min = st.number_input(
+                "Conformal p min",
+                value=float(STRATEGY.conformal_p_min),
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+            )
 
         with st.expander("Learning-rate range test", expanded=TRAINING.enable_lr_range_test):
             enable_lr_range_test = st.checkbox(
@@ -297,7 +418,10 @@ def run_app() -> None:
                 "LR range steps", value=int(TRAINING.lr_range_steps), min_value=5, max_value=200, step=5
             )
 
-        use_cv = st.checkbox("Enable rolling-origin CV", value=False)
+        use_cv = st.checkbox("Enable rolling-origin CV", value=TRAINING.use_cv)
+        training_cv_folds = st.number_input(
+            "CV folds", value=int(TRAINING.cv_folds), min_value=1, max_value=20, step=1
+        )
         results_dir_input = st.text_input("Results directory", value=str(APP_CONFIG.reporting.output_dir))
         train_button = st.button("Start training", type="primary")
 
@@ -308,6 +432,22 @@ def run_app() -> None:
     if train_button:
         if enable_lr_range_test and lr_range_min >= lr_range_max:
             placeholder.error("LR range min must be strictly less than LR range max.")
+            st.stop()
+        try:
+            strategy_thresholds = tuple(
+                sorted(
+                    {
+                        float(token.strip())
+                        for token in thresholds_text.split(",")
+                        if token.strip()
+                    }
+                )
+            )
+        except ValueError:
+            placeholder.error("Invalid strategy thresholds. Use comma-separated floats.")
+            st.stop()
+        if not strategy_thresholds:
+            placeholder.error("Please provide at least one strategy threshold.")
             st.stop()
         placeholder.warning("Downloading data and training the model. This may take a few minutes...")
         binance_config = _build_binance_config(
@@ -333,6 +473,10 @@ def run_app() -> None:
             hermite_maps_b=int(hermite_maps_b),
             hermite_hidden_dim=int(hermite_hidden_dim),
             dropout=float(dropout),
+            hermite_version=hermite_version,
+            use_lstm=use_lstm,
+            lstm_hidden=int(lstm_hidden),
+            prob_source=prob_source,
         )
         training_config = replace(
             TRAINING,
@@ -350,12 +494,32 @@ def run_app() -> None:
             focal_gamma=float(focal_gamma),
             auto_pos_weight=auto_pos_weight,
             min_pos_weight_samples=int(min_pos_weight_samples),
-            early_stopping_patience=int(early_stopping_patience),
             seed=int(seed),
             enable_lr_range_test=enable_lr_range_test,
             lr_range_min=float(lr_range_min),
             lr_range_max=float(lr_range_max),
             lr_range_steps=int(lr_range_steps),
+            reg_weight=float(reg_weight),
+            cls_weight=float(cls_weight),
+            unc_weight=float(unc_weight),
+            sign_hinge_weight=float(sign_hinge_weight),
+            use_cv=use_cv,
+            cv_folds=int(training_cv_folds),
+            early_stop_metric=early_stop_metric,
+            patience=int(patience),
+            min_delta=float(min_delta),
+        )
+        strategy_config = replace(
+            STRATEGY,
+            thresholds=strategy_thresholds,
+            confidence_margin=float(strategy_confidence_margin),
+            kelly_clip=float(strategy_kelly_clip),
+            use_conformal_gate=strategy_use_conformal_gate,
+            conformal_p_min=float(strategy_conformal_p_min),
+        )
+        evaluation_config = replace(
+            APP_CONFIG.evaluation,
+            cv_folds=int(training_cv_folds),
         )
         app_config: AppConfig = replace(
             APP_CONFIG,
@@ -363,6 +527,8 @@ def run_app() -> None:
             data=data_config,
             model=model_config,
             training=training_config,
+            strategy=strategy_config,
+            evaluation=evaluation_config,
         )
         fetcher = BinanceDataFetcher(binance_config)
         trainer = HermiteTrainer(config=app_config, fetcher=fetcher)

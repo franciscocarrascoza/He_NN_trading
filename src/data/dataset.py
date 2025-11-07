@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from src.config import DATA, DataConfig
+from src.config import DATA, FEATURES, DataConfig, FeatureConfig
 from src.data.labels import make_labels
 from src.features import compute_stationary_features
 
@@ -45,6 +45,7 @@ class HermiteDataset(Dataset):
         candles: pd.DataFrame,
         *,
         data_config: DataConfig = DATA,
+        feature_config: FeatureConfig = FEATURES,
         liquidity_features: pd.DataFrame | None = None,
         orderbook_features: pd.DataFrame | None = None,
     ) -> None:
@@ -57,12 +58,17 @@ class HermiteDataset(Dataset):
             raise KeyError("candles must include 'close_time' column.")
 
         self.data_config = data_config
+        self.feature_config = feature_config
 
         candles = candles.reset_index(drop=True).copy()
         if not candles["close_time"].is_monotonic_increasing:
             raise ValueError("candles must be sorted by close_time in ascending order.")
 
-        stationary_frame = compute_stationary_features(candles, config=data_config)
+        stationary_frame = compute_stationary_features(
+            candles,
+            config=data_config,
+            feature_config=feature_config,
+        )
         if len(stationary_frame) != len(candles):
             raise ValueError("Stationary feature frame must align with candle length.")
 

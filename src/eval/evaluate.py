@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from src.config import BINANCE, TRAINING, BinanceAPIConfig, TrainingConfig
+from src.config import BINANCE, DATA, FEATURES, MODEL, TRAINING, BinanceAPIConfig, TrainingConfig
 from src.data import BinanceDataFetcher, HermiteDataset
 from src.features import compute_liquidity_features_series, compute_orderbook_features_series
 from src.models import HermiteForecaster
@@ -57,18 +57,22 @@ def evaluate_checkpoint(
     orderbook_series = compute_orderbook_features_series(candles)
     dataset = HermiteDataset(
         candles,
+        data_config=replace(DATA, feature_window=training_config.feature_window, forecast_horizon=training_config.forecast_horizon),
+        feature_config=FEATURES,
         liquidity_features=liquidity_series,
         orderbook_features=orderbook_series,
-        feature_window=training_config.feature_window,
-        forecast_horizon=training_config.forecast_horizon,
-        normalise=False,
     )
 
     feature_mean = checkpoint["feature_mean"].to(torch.float32)
     feature_std = checkpoint["feature_std"].to(torch.float32)
     dataset.features = (dataset.features - feature_mean) / feature_std
 
-    model = HermiteForecaster(input_dim=dataset.features.shape[1], config=training_config)
+    model = HermiteForecaster(
+        input_dim=dataset.features.shape[1],
+        model_config=MODEL,
+        feature_window=dataset.feature_window,
+        window_feature_columns=HermiteDataset.window_feature_columns,
+    )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
 
@@ -87,9 +91,10 @@ def evaluate_checkpoint(
     )
 
     with torch.no_grad():
-        pred_lr, direction_logits = model(dataset.features[val_indices])
-    preds = pred_lr.squeeze(1).cpu().numpy()
-    direction_logits = direction_logits.squeeze(1).cpu().numpy()
+        output = model(dataset.features[val_indices])
+    preds = output.mu.squeeze(1).cpu().numpy()
+    direction_logits = output.logits.squeeze(1).cpu().numpy()
+    direction_probs = output.probability(MODEL.prob_source).squeeze(1).cpu().numpy()
 
     anchor_prices = dataset.anchor_prices[val_indices].numpy()
     true_log_returns = dataset.targets[val_indices].squeeze(1).numpy()
@@ -106,7 +111,6 @@ def evaluate_checkpoint(
     avg_last10 = float(abs_err[-10:].mean()) if abs_err.size else float("nan")
 
     direction_targets = (true_log_returns > 0).astype(int)
-    direction_probs = 1.0 / (1.0 + np.exp(-direction_logits))
     direction_pred = (direction_probs >= 0.5).astype(int)
     direction_correct = (direction_pred == direction_targets).astype(int)
     hit_rate = float(direction_correct.mean()) if direction_correct.size else float("nan")

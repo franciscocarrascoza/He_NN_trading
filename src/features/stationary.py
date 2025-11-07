@@ -5,7 +5,7 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-from src.config import DataConfig
+from src.config import DATA, DataConfig, FeatureConfig, FEATURES
 
 
 def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -40,7 +40,13 @@ def _resolve_close_times(series: pd.Series) -> pd.DatetimeIndex:
     return pd.to_datetime(numeric, unit="ms", utc=True)
 
 
-def compute_stationary_features(candles: pd.DataFrame, *, config: DataConfig) -> pd.DataFrame:
+def compute_stationary_features(
+    candles: pd.DataFrame,
+    *,
+    config: DataConfig = DATA,
+    feature_config: FeatureConfig | None = None,
+) -> pd.DataFrame:
+    """Build stationary features (returns, spreads, EMAs) for Hermite training."""
     required_cols = {"open", "high", "low", "close", "volume", "close_time"}
     missing = required_cols.difference(candles.columns)
     if missing:
@@ -80,6 +86,13 @@ def compute_stationary_features(candles: pd.DataFrame, *, config: DataConfig) ->
 
     rolling_max = close.rolling(window=config.drawdown_window, min_periods=1).max()
     feature_columns["recent_drawdown"] = _safe_divide(close, rolling_max) - 1.0
+
+    feature_cfg = feature_config or FEATURES
+    if feature_cfg.add_ema:
+        for window in feature_cfg.ema_windows:
+            span = max(int(window), 1)
+            ema = log_ret_close.ewm(span=span, adjust=False, min_periods=1).mean().fillna(0.0)
+            feature_columns[f"log_ret_ema_{span}"] = ema
 
     close_times = _resolve_close_times(df["close_time"])
     if isinstance(close_times, pd.DatetimeIndex):

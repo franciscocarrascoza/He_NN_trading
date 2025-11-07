@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+"""Training loop, data prep, and evaluation for the Hermite forecaster."""
+
 import copy
 import itertools
+import json
 import logging
 import os
 import math
@@ -50,41 +53,21 @@ from src.eval.diagnostics import (
     probability_calibration_metrics,
     runs_test,
 )
-from src.eval.strategy import StrategyMetrics, baseline_strategies, evaluate_strategy
-from src.models import HermiteForecaster
+from src.eval.strategy import StrategyMetrics, StrategySummary, baseline_strategies, evaluate_strategy
+from src.features import compute_liquidity_features_series, compute_orderbook_features_series
+from src.models import HermiteForecaster, ModelOutput
 from src.pipeline.scaler import LeakageGuardScaler, ScalerStats
 from src.pipeline.split import FoldIndices, RollingOriginSplitter
-from src.reporting.plots import save_lr_range_plot, save_reliability_diagram
-from src.features import compute_liquidity_features_series, compute_orderbook_features_series
+from src.reporting.plots import (
+    save_lr_range_plot,
+    save_probability_histogram,
+    save_qq_plot,
+    save_reliability_diagram,
+    save_sign_scatter,
+)
+from src.utils.utils import pit_zscore, pt_test, set_seed
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _set_global_seed(seed: int) -> None:
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if hasattr(torch, "set_num_threads"):
-        try:
-            torch.set_num_threads(1)
-        except RuntimeError:
-            pass
-    if hasattr(torch, "set_num_interop_threads"):
-        try:
-            torch.set_num_interop_threads(1)
-        except RuntimeError:
-            pass
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except AttributeError:
-        pass
 
 
 def _select_device(preference: str) -> torch.device:
@@ -124,6 +107,16 @@ def _build_dataloader(
     subset_labels = direction_labels.index_select(0, indices)
     dataset = TensorDataset(subset_features, subset_targets, subset_labels)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+def _variance_regulariser(logvar: torch.Tensor) -> torch.Tensor:
+    return torch.exp(logvar).mean()
+
+
+def _sign_consistency_loss(mu: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    pred_sign = torch.tanh(0.5 * mu)
+    target_sign = torch.sign(targets).clamp(min=-1.0, max=1.0)
+    return F.mse_loss(pred_sign, target_sign)
 
 
 def _sigmoid_focal_loss_with_logits(
@@ -319,6 +312,7 @@ class FoldResult:
     probability_collapse: bool
     coverage_warning: Optional[str]
     strategy_metrics: StrategyMetrics
+    strategy_runs: Dict[float, StrategyMetrics]
     baseline_metrics: Dict[str, StrategyMetrics]
     quantile: float
     coverage: float
@@ -326,7 +320,9 @@ class FoldResult:
     conformal_p_values: np.ndarray
     calibration_residuals: np.ndarray
     forecast_frame: pd.DataFrame
+    predictions_path: Path
     reliability_paths: Dict[str, Path]
+    extra_plot_paths: Dict[str, Path]
     scaler_stats: ScalerStats
     training_losses: List[float]
     validation_losses: List[float]
@@ -336,6 +332,7 @@ class FoldResult:
     training_brier_scores: List[float]
     validation_nll_scores: List[float]
     validation_bce_scores: List[float]
+    validation_auc_scores: List[float]
     learning_rates: List[float]
     lr_range_path: Optional[Path]
 
@@ -347,6 +344,7 @@ class TrainingArtifacts:
     results_table: pd.DataFrame
     csv_path: Optional[Path]
     markdown_path: Optional[Path]
+    summary_path: Optional[Path]
 
 
 class HermiteTrainer:
@@ -376,6 +374,7 @@ class HermiteTrainer:
         dataset = HermiteDataset(
             candles,
             data_config=self.config.data,
+            feature_config=feature_cfg,
             liquidity_features=liquidity_series,
             orderbook_features=orderbook_series,
         )
@@ -385,30 +384,32 @@ class HermiteTrainer:
         self,
         dataset: Optional[HermiteDataset] = None,
         *,
-        use_cv: bool,
+        use_cv: Optional[bool] = None,
         results_dir: Optional[Path] = None,
     ) -> TrainingArtifacts:
         cfg = self.config
         dataset = dataset or self.prepare_dataset()
         seconds_step = _seconds_per_step(dataset.anchor_times)
+        evaluation_cfg = replace(cfg.evaluation, cv_folds=cfg.training.cv_folds)
         splitter = RollingOriginSplitter(
             dataset_length=len(dataset),
             data_config=cfg.data,
-            evaluation_config=cfg.evaluation,
+            evaluation_config=evaluation_cfg,
         )
-        folds = splitter.split(use_cv=use_cv)
+        effective_use_cv = use_cv if use_cv is not None else cfg.training.use_cv
+        folds = splitter.split(use_cv=effective_use_cv)
         LOGGER.info(
             "Prepared folds",
             extra={
                 "event": "split_ready",
                 "folds": len(folds),
-                "use_cv": use_cv,
+                "use_cv": effective_use_cv,
             },
         )
         fold_results: List[FoldResult] = []
-        alpha = cfg.evaluation.alpha
-        threshold = cfg.evaluation.threshold
-        cost_bps = cfg.evaluation.cost_bps
+        alpha = evaluation_cfg.alpha
+        threshold = evaluation_cfg.threshold
+        cost_bps = evaluation_cfg.cost_bps
 
         output_dir = (results_dir or Path(cfg.reporting.output_dir)).resolve()
         plot_dir = output_dir / "plots"
@@ -425,12 +426,12 @@ class HermiteTrainer:
             )
             fold_results.append(fold_result)
 
-        results_table, csv_path, markdown_path = self._build_results(
+        results_table, csv_path, markdown_path, summary_path = self._build_results(
             fold_results,
             cfg.reporting,
             cfg.data.forecast_horizon,
             alpha,
-            cfg.evaluation.save_markdown,
+            evaluation_cfg.save_markdown,
             results_dir=output_dir,
         )
 
@@ -440,6 +441,7 @@ class HermiteTrainer:
             results_table=results_table,
             csv_path=csv_path,
             markdown_path=markdown_path,
+            summary_path=summary_path,
         )
 
     def _lr_range_test(
@@ -460,6 +462,8 @@ class HermiteTrainer:
         model = HermiteForecaster(
             input_dim=feature_dim,
             model_config=self.config.model,
+            feature_window=self.config.data.feature_window,
+            window_feature_columns=HermiteDataset.window_feature_columns,
         ).to(self.device)
         model.train()
         temp_cfg = replace(cfg_train, learning_rate=min_lr)
@@ -475,7 +479,10 @@ class HermiteTrainer:
             for param_group in optimiser.param_groups:
                 param_group["lr"] = float(lr)
             optimiser.zero_grad()
-            mu, logvar, _, logits = model(batch_features)
+            output = model(batch_features)
+            mu = output.mu
+            logvar = output.logvar
+            logits = output.logits
             nll = 0.5 * ((batch_targets - mu) ** 2 * torch.exp(-logvar) + logvar)
             labels_float = batch_labels.to(batch_targets.dtype)
             if classification_mode == "bce":
@@ -492,7 +499,12 @@ class HermiteTrainer:
                     gamma=cfg_train.focal_gamma,
                     reduction="none",
                 )
-            loss = nll.mean() + cfg_train.lambda_bce * bce.mean()
+            loss = (
+                cfg_train.reg_weight * nll.mean()
+                + cfg_train.cls_weight * bce.mean()
+                + cfg_train.unc_weight * _variance_regulariser(logvar)
+                + cfg_train.sign_hinge_weight * _sign_consistency_loss(mu, batch_targets)
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg_train.gradient_clip)
             optimiser.step()
@@ -513,7 +525,7 @@ class HermiteTrainer:
     ) -> FoldResult:
         cfg_train = self.config.training
         cfg_model = self.config.model
-        _set_global_seed(cfg_train.seed + fold.fold_id)
+        set_seed(cfg_train.seed + fold.fold_id)
 
         scaler = LeakageGuardScaler(max_index=int(fold.scaler_idx[-1].item()))
         scaled_features, stats = scaler.fit_transform(dataset.features, fold.scaler_idx)
@@ -675,6 +687,8 @@ class HermiteTrainer:
         model = HermiteForecaster(
             input_dim=scaled_features.shape[1],
             model_config=cfg_model,
+            feature_window=self.config.data.feature_window,
+            window_feature_columns=dataset.window_feature_columns,
         ).to(self.device)
         optimiser = _build_optimizer(model.parameters(), cfg_train)
         steps_per_epoch = max(1, len(train_loader))
@@ -682,8 +696,7 @@ class HermiteTrainer:
 
         best_state = None
         best_val_loss = float("inf")
-        best_val_brier = float("inf")
-        patience = max(0, cfg_train.early_stopping_patience)
+        best_metric = float("-inf")
         patience_counter = 0
         training_losses: List[float] = []
         validation_losses: List[float] = []
@@ -693,6 +706,7 @@ class HermiteTrainer:
         training_brier_scores: List[float] = []
         validation_nll_scores: List[float] = []
         validation_bce_scores: List[float] = []
+        validation_auc_scores: List[float] = []
         learning_rates: List[float] = []
 
         for epoch in range(cfg_train.num_epochs):
@@ -700,6 +714,8 @@ class HermiteTrainer:
             running_loss = 0.0
             running_nll = 0.0
             running_bce = 0.0
+            running_unc = 0.0
+            running_sign = 0.0
             train_brier_sum = 0.0
             count = 0
             for batch_features, batch_targets, batch_labels in train_loader:
@@ -711,7 +727,10 @@ class HermiteTrainer:
                 if not torch.equal(target_sign, label_sign):
                     raise RuntimeError("Direction labels mismatch regression target sign within batch.")
                 optimiser.zero_grad()
-                mu, logvar, _, logits = model(batch_features)
+                output = model(batch_features)
+                mu = output.mu
+                logvar = output.logvar
+                logits = output.logits
                 nll = 0.5 * ((batch_targets - mu) ** 2 * torch.exp(-logvar) + logvar)
                 labels_float = batch_labels.to(batch_targets.dtype)
                 if classification_mode == "bce":
@@ -728,9 +747,16 @@ class HermiteTrainer:
                         gamma=cfg_train.focal_gamma,
                         reduction="none",
                     )
-                bce_mean = bce.mean()
-                nll_mean = nll.mean()
-                loss = nll_mean + cfg_train.lambda_bce * bce_mean
+                loss_cls = bce.mean()
+                loss_nll = nll.mean()
+                loss_var = _variance_regulariser(logvar)
+                loss_sign = _sign_consistency_loss(mu, batch_targets)
+                loss = (
+                    cfg_train.reg_weight * loss_nll
+                    + cfg_train.cls_weight * loss_cls
+                    + cfg_train.unc_weight * loss_var
+                    + cfg_train.sign_hinge_weight * loss_sign
+                )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg_train.gradient_clip)
                 optimiser.step()
@@ -738,14 +764,18 @@ class HermiteTrainer:
                     scheduler.step()
                 batch_size = batch_features.size(0)
                 running_loss += loss.item() * batch_size
-                running_nll += float(nll_mean.item()) * batch_size
-                running_bce += float(bce_mean.item()) * batch_size
-                prob = torch.sigmoid(logits)
+                running_nll += float(loss_nll.item()) * batch_size
+                running_bce += float(loss_cls.item()) * batch_size
+                running_unc += float(loss_var.item()) * batch_size
+                running_sign += float(loss_sign.item()) * batch_size
+                prob = output.probability(cfg_model.prob_source)
                 train_brier_sum += float(((prob - labels_float) ** 2).sum().item())
                 count += batch_size
             epoch_train_loss = running_loss / max(1, count)
             epoch_train_nll = running_nll / max(1, count)
             epoch_train_bce = running_bce / max(1, count)
+            epoch_train_unc = running_unc / max(1, count)
+            epoch_train_sign = running_sign / max(1, count)
             epoch_train_brier = train_brier_sum / max(1, count)
             training_losses.append(epoch_train_loss)
             training_nll_scores.append(epoch_train_nll)
@@ -758,6 +788,12 @@ class HermiteTrainer:
             val_brier_sum = 0.0
             val_nll_sum = 0.0
             val_bce_sum = 0.0
+            val_unc_sum = 0.0
+            val_sign_sum = 0.0
+            val_probs_epoch: List[np.ndarray] = []
+            val_targets_epoch: List[np.ndarray] = []
+            val_dir_epoch: List[np.ndarray] = []
+            val_mu_epoch: List[np.ndarray] = []
             with torch.no_grad():
                 for batch_features, batch_targets, batch_labels in val_loader:
                     batch_features = batch_features.to(self.device)
@@ -767,7 +803,10 @@ class HermiteTrainer:
                     label_sign = batch_labels.view(-1).to(torch.int64)
                     if not torch.equal(target_sign, label_sign):
                         raise RuntimeError("Direction labels mismatch regression target sign within validation batch.")
-                    mu, logvar, _, logits = model(batch_features)
+                    output = model(batch_features)
+                    mu = output.mu
+                    logvar = output.logvar
+                    logits = output.logits
                     nll = 0.5 * ((batch_targets - mu) ** 2 * torch.exp(-logvar) + logvar)
                     labels_float = batch_labels.to(batch_targets.dtype)
                     if classification_mode == "bce":
@@ -784,28 +823,98 @@ class HermiteTrainer:
                             gamma=cfg_train.focal_gamma,
                             reduction="none",
                         )
-                    bce_mean = bce.mean()
-                    nll_mean = nll.mean()
-                    loss = nll_mean + cfg_train.lambda_bce * bce_mean
+                    loss_cls = bce.mean()
+                    loss_nll = nll.mean()
+                    loss_var = _variance_regulariser(logvar)
+                    loss_sign = _sign_consistency_loss(mu, batch_targets)
+                    loss = (
+                        cfg_train.reg_weight * loss_nll
+                        + cfg_train.cls_weight * loss_cls
+                        + cfg_train.unc_weight * loss_var
+                        + cfg_train.sign_hinge_weight * loss_sign
+                    )
                     batch_size = batch_features.size(0)
                     val_loss += loss.item() * batch_size
                     val_count += batch_size
-                    val_nll_sum += float(nll_mean.item()) * batch_size
-                    val_bce_sum += float(bce_mean.item()) * batch_size
-                    prob = torch.sigmoid(logits)
+                    val_nll_sum += float(loss_nll.item()) * batch_size
+                    val_bce_sum += float(loss_cls.item()) * batch_size
+                    val_unc_sum += float(loss_var.item()) * batch_size
+                    val_sign_sum += float(loss_sign.item()) * batch_size
+                    prob = output.probability(cfg_model.prob_source)
                     brier_batch = ((prob - labels_float) ** 2).sum()
                     val_brier_sum += float(brier_batch.item())
+                    val_probs_epoch.append(prob.detach().cpu().numpy().ravel())
+                    val_targets_epoch.append(batch_targets.detach().cpu().numpy().ravel())
+                    val_dir_epoch.append(batch_labels.detach().cpu().numpy().astype(int).ravel())
+                    val_mu_epoch.append(mu.detach().cpu().numpy().ravel())
             epoch_val_loss = val_loss / max(1, val_count)
             epoch_val_brier = val_brier_sum / max(1, val_count)
             epoch_val_nll = val_nll_sum / max(1, val_count)
             epoch_val_bce = val_bce_sum / max(1, val_count)
+            epoch_val_unc = val_unc_sum / max(1, val_count)
+            epoch_val_sign = val_sign_sum / max(1, val_count)
             validation_losses.append(epoch_val_loss)
             validation_brier_scores.append(epoch_val_brier)
             validation_nll_scores.append(epoch_val_nll)
             validation_bce_scores.append(epoch_val_bce)
+            val_probs_concat = np.concatenate(val_probs_epoch) if val_probs_epoch else np.array([], dtype=float)
+            val_targets_concat = np.concatenate(val_targets_epoch) if val_targets_epoch else np.array([], dtype=float)
+            val_dir_concat = np.concatenate(val_dir_epoch) if val_dir_epoch else np.array([], dtype=float)
+            val_mu_concat = np.concatenate(val_mu_epoch) if val_mu_epoch else np.array([], dtype=float)
+            if val_probs_concat.size and val_targets_concat.size:
+                epoch_cal_metrics = probability_calibration_metrics(
+                    val_targets_concat,
+                    val_probs_concat,
+                    n_bins=self.config.evaluation.n_bins,
+                )
+                epoch_auc = epoch_cal_metrics.auc
+            else:
+                epoch_auc = float("nan")
+            validation_auc_scores.append(epoch_auc)
+            if val_targets_concat.size and val_mu_concat.size:
+                epoch_mz = mincer_zarnowitz(val_targets_concat, val_mu_concat)
+                LOGGER.info(
+                    "Epoch MZ stats",
+                    extra={
+                        "event": "epoch_mz",
+                        "fold_id": fold.fold_id,
+                        "epoch": epoch,
+                        "intercept": epoch_mz.intercept,
+                        "slope": epoch_mz.slope,
+                        "p_value": epoch_mz.p_value,
+                    },
+                )
+            else:
+                epoch_mz = None
 
             current_lr = float(optimiser.param_groups[0]["lr"])
             learning_rates.append(current_lr)
+
+            metric_choice = cfg_train.early_stop_metric.lower()
+            if metric_choice == "auc":
+                chosen_metric = epoch_auc
+            elif metric_choice == "diracc":
+                if val_dir_concat.size and val_probs_concat.size:
+                    dir_preds = (val_probs_concat >= 0.5).astype(int)
+                    chosen_metric = float((dir_preds == val_dir_concat).mean())
+                else:
+                    chosen_metric = float("nan")
+            else:
+                chosen_metric = -epoch_val_loss
+
+            if math.isnan(chosen_metric):
+                chosen_metric = float("-inf")
+
+            improved = chosen_metric >= (best_metric + cfg_train.min_delta)
+            if improved:
+                best_metric = chosen_metric
+                best_val_loss = min(best_val_loss, epoch_val_loss)
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if cfg_train.patience > 0 and patience_counter >= cfg_train.patience:
+                    break
 
             LOGGER.info(
                 "Epoch metrics",
@@ -816,11 +925,16 @@ class HermiteTrainer:
                     "train_loss": epoch_train_loss,
                     "train_nll": epoch_train_nll,
                     "train_bce": epoch_train_bce,
+                    "train_unc": epoch_train_unc,
+                    "train_sign": epoch_train_sign,
                     "train_brier": epoch_train_brier,
                     "val_loss": epoch_val_loss,
                     "val_nll": epoch_val_nll,
                     "val_bce": epoch_val_bce,
+                    "val_unc": epoch_val_unc,
+                    "val_sign": epoch_val_sign,
                     "val_brier": epoch_val_brier,
+                    "val_auc": epoch_auc,
                     "lr": current_lr,
                 },
             )
@@ -837,42 +951,41 @@ class HermiteTrainer:
                     extra={"event": "loss_divergence", "fold_id": fold.fold_id, "epoch": epoch},
                 )
                 break
-
             if scheduler is not None and not scheduler_batch_step:
                 scheduler.step()
-
-            if epoch_val_loss + 1e-8 < best_val_loss or epoch_val_brier + 1e-8 < best_val_brier:
-                best_val_loss = epoch_val_loss
-                best_val_brier = min(best_val_brier, epoch_val_brier)
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience > 0 and patience_counter >= patience:
-                    break
 
         if best_state is not None:
             model.load_state_dict(best_state)
 
         model.eval()
+        prob_source = cfg_model.prob_source
         with torch.no_grad():
             val_features = scaled_features.index_select(0, fold.val_idx).to(self.device)
             val_targets = scaled_targets.index_select(0, fold.val_idx).to(self.device)
-            mu_val, logvar_val, p_up_val, logits_val = model(val_features)
+            val_output = model(val_features)
+            mu_val = val_output.mu
+            logvar_val = val_output.logvar
+            logits_val = val_output.logits
+            prob_val = val_output.probability(prob_source)
+
             cal_features = scaled_features.index_select(0, fold.calibration_idx).to(self.device)
             cal_targets = scaled_targets.index_select(0, fold.calibration_idx).to(self.device)
-            mu_cal, logvar_cal, p_up_cal, logits_cal = model(cal_features)
+            cal_output = model(cal_features)
+            mu_cal = cal_output.mu
+            logvar_cal = cal_output.logvar
+            logits_cal = cal_output.logits
+            prob_cal = cal_output.probability(prob_source)
 
         mu_val_np = mu_val.squeeze(1).cpu().numpy()
         logvar_val_np = logvar_val.squeeze(1).cpu().numpy()
         sigma_val_np = np.exp(0.5 * logvar_val_np)
         sigma_val_np = np.clip(sigma_val_np, 1e-6, None)
-        p_up_val_np = p_up_val.squeeze(1).cpu().numpy()
+        p_up_val_np = prob_val.squeeze(1).cpu().numpy()
         logits_val_np = logits_val.squeeze(1).cpu().numpy()
         y_val_np = val_targets.squeeze(1).cpu().numpy()
         mu_cal_np = mu_cal.squeeze(1).cpu().numpy()
         logvar_cal_np = logvar_cal.squeeze(1).cpu().numpy()
-        p_up_cal_np = p_up_cal.squeeze(1).cpu().numpy()
+        p_up_cal_np = prob_cal.squeeze(1).cpu().numpy()
         logits_cal_np = logits_cal.squeeze(1).cpu().numpy()
         y_cal_np = cal_targets.squeeze(1).cpu().numpy()
         sigma_cal_np = np.exp(0.5 * logvar_cal_np)
@@ -915,8 +1028,8 @@ class HermiteTrainer:
                 "name": name,
                 "prob_cal": prob_cal,
                 "prob_val": prob_val,
-                "metrics_cal": probability_calibration_metrics(y_cal_np, prob_cal),
-                "metrics_val": probability_calibration_metrics(y_val_np, prob_val),
+                "metrics_cal": probability_calibration_metrics(y_cal_np, prob_cal, n_bins=self.config.evaluation.n_bins),
+                "metrics_val": probability_calibration_metrics(y_val_np, prob_val, n_bins=self.config.evaluation.n_bins),
                 "params": params,
             }
 
@@ -985,6 +1098,7 @@ class HermiteTrainer:
         normalized_error = np.abs(realised_error) / sigma_val_np
         lower, upper = conformal_interval(mu_val_np, quantile * sigma_val_np)
         p_values = conformal_p_value(cal_residuals, normalized_error)
+        pit_z = pit_zscore(y_val_np, mu_val_np, sigma_val_np)
 
         anchor_prices = dataset.anchor_prices.index_select(0, fold.val_idx).numpy()
         anchor_times = dataset.anchor_times.index_select(0, fold.val_idx).numpy()
@@ -1006,6 +1120,7 @@ class HermiteTrainer:
         direction_true = direction_val_np
         dir_acc = float(np.mean(direction_pred == direction_true))
         binom_p = binomial_test_pvalue(int((direction_pred == direction_true).sum()), direction_pred.size)
+        pt_p = pt_test(direction_true, direction_pred)
 
         zero_benchmark = np.zeros_like(y_val_np)
         dm_mse = diebold_mariano(y_val_np, mu_val_np, zero_benchmark, horizon=self.config.data.forecast_horizon, loss="mse")
@@ -1018,13 +1133,20 @@ class HermiteTrainer:
         calibration_raw_metrics = calibration_metrics_raw
         calibration_calibrated_metrics = calibration_metrics_calibrated
 
-        strategy = evaluate_strategy(
+        strategy_cfg = self.config.strategy
+        strategy_summary = evaluate_strategy(
             y_val_np,
             p_up_calibrated_val,
-            threshold=threshold,
+            thresholds=strategy_cfg.thresholds,
             cost_bps=cost_bps,
             seconds_per_step=seconds_per_step,
+            confidence_margin=strategy_cfg.confidence_margin,
+            kelly_clip=strategy_cfg.kelly_clip,
+            conformal_p=p_values,
+            use_conformal_gate=strategy_cfg.use_conformal_gate,
+            conformal_p_min=strategy_cfg.conformal_p_min,
         )
+        strategy = strategy_summary.best_metrics
         baselines = baseline_strategies(
             y_val_np,
             cost_bps=cost_bps,
@@ -1061,16 +1183,23 @@ class HermiteTrainer:
         forecast_frame = pd.DataFrame(
             {
                 "fold": fold.fold_id,
+                "timestamp": pd.to_datetime(target_times, unit="ms", utc=True),
                 "anchor_time": anchor_times,
                 "target_time": target_times,
                 "anchor_price": anchor_prices,
                 "true_log_return": y_val_np,
+                "y": y_val_np,
                 "pred_mean": mu_val_np,
+                "mu": mu_val_np,
                 "pred_logvar": logvar_val_np,
                 "pred_sigma": sigma_val_np,
+                "sigma": sigma_val_np,
                 "prob_up": p_up_calibrated_val,
+                "p_up_cal": p_up_calibrated_val,
                 "prob_up_raw": p_up_val_np,
+                "p_up_raw": p_up_val_np,
                 "logits": logits_val_np,
+                "logit": logits_val_np,
                 "pred_price": predicted_prices,
                 "true_price": actual_prices,
                 "conformal_lower": lower,
@@ -1079,8 +1208,14 @@ class HermiteTrainer:
                 "conformal_upper_price": interval_upper_price,
                 "conformal_p": p_values,
                 "normalized_abs_error": normalized_error,
+                "pit_z": pit_z,
             }
         )
+        predictions_dir = plot_dir.parent / "predictions"
+        predictions_dir.mkdir(parents=True, exist_ok=True)
+        timestamp_suffix = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+        predictions_path = predictions_dir / f"predictions_fold_{fold.fold_id}_{timestamp_suffix}.csv"
+        forecast_frame.to_csv(predictions_path, index=False)
 
         reliability_paths = {
             "raw": plot_dir / f"reliability_raw_fold_{fold.fold_id}.png",
@@ -1097,6 +1232,26 @@ class HermiteTrainer:
             title=f"Reliability Diagram (Calibrated Fold {fold.fold_id})",
         )
 
+        hist_path = plot_dir / f"plots_fold_{fold.fold_id}_prob_hist.png"
+        save_probability_histogram(
+            p_up_calibrated_val,
+            output_path=hist_path,
+            title=f"Probabilities (Fold {fold.fold_id})",
+        )
+        qq_path = plot_dir / f"plots_fold_{fold.fold_id}_pit_qq.png"
+        save_qq_plot(
+            pit_z,
+            output_path=qq_path,
+            title=f"PIT QQ Plot (Fold {fold.fold_id})",
+        )
+        sign_path = plot_dir / f"plots_fold_{fold.fold_id}_sign_scatter.png"
+        save_sign_scatter(
+            mu_val_np,
+            y_val_np,
+            output_path=sign_path,
+            title=f"sign(μ) vs sign(y) Fold {fold.fold_id}",
+        )
+
         coverage_key = f"Conf_Coverage@{int(round((1 - alpha) * 100))}%"
         width_key = f"Conf_Width@{int(round((1 - alpha) * 100))}%"
 
@@ -1108,6 +1263,7 @@ class HermiteTrainer:
             "sMAPE_price": smape_price,
             "DirAcc": dir_acc,
             "Binom_p": binom_p,
+            "PT_p": pt_p,
             "DM_p_SE": dm_mse.p_value,
             "DM_d_SE": dm_mse.mean_loss_diff,
             "DM_p_AE": dm_mae.p_value,
@@ -1125,18 +1281,28 @@ class HermiteTrainer:
             "Brier_resolution_raw": calibration_raw_metrics.brier_resolution,
             "Brier_reliability": calibration_calibrated_metrics.brier_reliability,
             "Brier_reliability_raw": calibration_raw_metrics.brier_reliability,
+            "MCE": calibration_calibrated_metrics.mce,
+            "MCE_raw": calibration_raw_metrics.mce,
             "AUC": calibration_calibrated_metrics.auc,
             "AUC_raw": calibration_raw_metrics.auc,
             "ECE": calibration_calibrated_metrics.ece,
             "ECE_raw": calibration_raw_metrics.ece,
             coverage_key: coverage,
             width_key: interval_width,
+            "Strategy_best_threshold": strategy.threshold if strategy.threshold is not None else strategy_summary.best_threshold,
             "Sharpe_strategy": strategy.sharpe,
             "MDD_strategy": strategy.max_drawdown,
             "Turnover": strategy.turnover,
+            "Strategy_active_fraction": strategy.active_fraction if strategy.active_fraction is not None else float("nan"),
             "Sharpe_naive_long": baselines["always_long"].sharpe,
             "Sharpe_naive_flat": baselines["always_flat"].sharpe,
         }
+
+        for thr, strat_metrics in strategy_summary.per_threshold.items():
+            prefix = f"Strat@{thr:.2f}"
+            metrics[f"{prefix}_Sharpe"] = strat_metrics.sharpe
+            metrics[f"{prefix}_Turnover"] = strat_metrics.turnover
+            metrics[f"{prefix}_HitRate"] = strat_metrics.hit_rate
 
         LOGGER.info(
             "Fold metrics",
@@ -1151,6 +1317,12 @@ class HermiteTrainer:
             },
         )
 
+        extra_plot_paths = {
+            "prob_hist": hist_path,
+            "pit_qq": qq_path,
+            "sign_scatter": sign_path,
+        }
+
         return FoldResult(
             fold_id=fold.fold_id,
             metrics=metrics,
@@ -1162,6 +1334,7 @@ class HermiteTrainer:
             probability_collapse=probability_collapse,
             coverage_warning=coverage_warning,
             strategy_metrics=strategy,
+            strategy_runs=strategy_summary.per_threshold,
             baseline_metrics=baselines,
             quantile=quantile,
             coverage=coverage,
@@ -1169,7 +1342,9 @@ class HermiteTrainer:
             conformal_p_values=p_values,
             calibration_residuals=cal_residuals,
             forecast_frame=forecast_frame,
+            predictions_path=predictions_path,
             reliability_paths=reliability_paths,
+            extra_plot_paths=extra_plot_paths,
             scaler_stats=stats,
             training_losses=training_losses,
             validation_losses=validation_losses,
@@ -1179,6 +1354,7 @@ class HermiteTrainer:
             training_brier_scores=training_brier_scores,
             validation_nll_scores=validation_nll_scores,
             validation_bce_scores=validation_bce_scores,
+            validation_auc_scores=validation_auc_scores,
             learning_rates=learning_rates,
             lr_range_path=lr_range_path,
         )
@@ -1192,7 +1368,7 @@ class HermiteTrainer:
         save_markdown: bool,
         *,
         results_dir: Optional[Path],
-    ) -> tuple[pd.DataFrame, Optional[Path], Optional[Path]]:
+    ) -> tuple[pd.DataFrame, Optional[Path], Optional[Path], Optional[Path]]:
         metrics_df = pd.DataFrame([fold.metrics for fold in fold_results])
         mean_series = metrics_df.mean()
         std_series = metrics_df.std(ddof=0)
@@ -1219,7 +1395,84 @@ class HermiteTrainer:
             markdown_path = output_dir / f"{csv_path.stem}.md"
             self._write_markdown(results_table, markdown_path, alpha)
 
-        return results_table, csv_path, markdown_path
+        summary_path = self._write_summary(fold_results, output_dir)
+
+        return results_table, csv_path, markdown_path, summary_path
+
+    def _write_summary(self, fold_results: Sequence[FoldResult], output_dir: Path) -> Optional[Path]:
+        if not fold_results:
+            return None
+
+        base_keys = [
+            "DirAcc",
+            "AUC",
+            "MZ_intercept",
+            "MZ_slope",
+            "MZ_F_p",
+            "PT_p",
+            "Brier",
+            "Brier_uncertainty",
+            "Brier_resolution",
+            "Brier_reliability",
+            "Sharpe_strategy",
+            "Strategy_best_threshold",
+        ]
+        coverage_keys = sorted({key for fold in fold_results for key in fold.metrics if key.startswith("Conf_Coverage@")})
+        width_keys = sorted({key for fold in fold_results for key in fold.metrics if key.startswith("Conf_Width@")})
+
+        def _safe_float(value: object) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        fold_entries: list[dict[str, float | int | None]] = []
+        for fold in fold_results:
+            metrics = fold.metrics
+            entry: dict[str, float | int | None] = {"fold_id": int(fold.fold_id)}
+            for key in base_keys + coverage_keys + width_keys:
+                if key in metrics:
+                    entry[key] = _safe_float(metrics[key])
+            fold_entries.append(entry)
+
+        averages: dict[str, float | None] = {}
+        keys_to_average = set().union(*(entry.keys() for entry in fold_entries)) - {"fold_id"}
+        for key in keys_to_average:
+            values = [entry.get(key) for entry in fold_entries if entry.get(key) is not None]
+            averages[key] = float(np.mean(values)) if values else None
+
+        strategy_details: dict[str, dict[str, object]] = {}
+        for fold in fold_results:
+            for threshold, metrics in fold.strategy_runs.items():
+                bucket = strategy_details.setdefault(f"{threshold:.4f}", {"entries": []})
+                bucket["entries"].append(
+                    {
+                        "fold_id": fold.fold_id,
+                        "sharpe": _safe_float(metrics.sharpe),
+                        "turnover": _safe_float(metrics.turnover),
+                        "hit_rate": _safe_float(metrics.hit_rate),
+                        "active_fraction": _safe_float(metrics.active_fraction),
+                    }
+                )
+        for threshold, payload in strategy_details.items():
+            entries = payload["entries"]
+            for field in ("sharpe", "turnover", "hit_rate", "active_fraction"):
+                vals = [entry[field] for entry in entries if entry[field] is not None]
+                payload[f"mean_{field}"] = float(np.mean(vals)) if vals else None
+
+        summary_payload = {
+            "generated_at": pd.Timestamp.utcnow().isoformat(),
+            "folds": len(fold_results),
+            "fold_metrics": fold_entries,
+            "averages": averages,
+            "strategy_thresholds": strategy_details,
+        }
+
+        summary_path = output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        return summary_path
 
     def _write_markdown(self, table: pd.DataFrame, path: Path, alpha: float) -> None:
         headers = list(table.columns)
@@ -1257,6 +1510,8 @@ class HermiteTrainer:
             "AUC_raw": "ROC AUC before probability calibration",
             "ECE": "Expected Calibration Error after probability calibration",
             "ECE_raw": "Expected Calibration Error before probability calibration",
+            "MCE": "Maximum Calibration Error after probability calibration",
+            "MCE_raw": "Maximum Calibration Error before calibration",
             coverage_label: f"empirical coverage of conformal intervals at {(1 - alpha) * 100:.0f}%",
             width_label: f"mean width of conformal intervals at {(1 - alpha) * 100:.0f}%",
             "MDD_strategy": "maximum drawdown of threshold strategy",

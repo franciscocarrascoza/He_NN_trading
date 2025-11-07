@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+from src.utils.utils import pt_test
 
 
 def _normal_sf(value: float) -> float:
@@ -187,6 +188,7 @@ class CalibrationMetrics:
     brier: float
     auc: float
     ece: float
+    mce: float
     brier_uncertainty: float
     brier_resolution: float
     brier_reliability: float
@@ -214,7 +216,7 @@ def probability_calibration_metrics(
     y_true: np.ndarray,
     prob_up: np.ndarray,
     *,
-    n_bins: int = 10,
+    n_bins: int = 15,
 ) -> CalibrationMetrics:
     y_true = np.asarray(y_true, dtype=float)
     prob_up = np.asarray(prob_up, dtype=float)
@@ -245,6 +247,7 @@ def probability_calibration_metrics(
     base_rate = float(labels.mean()) if total > 0 else float("nan")
     reliability_component = 0.0
     resolution_component = 0.0
+    max_calibration_error = 0.0
     for idx in range(n_bins):
         if bin_counts[idx] == 0:
             continue
@@ -253,12 +256,14 @@ def probability_calibration_metrics(
         ece += weight * abs(diff)
         reliability_component += weight * (diff ** 2)
         resolution_component += weight * ((bin_accuracy[idx] - base_rate) ** 2)
+        max_calibration_error = max(max_calibration_error, abs(diff))
     uncertainty_component = base_rate * (1.0 - base_rate) if not math.isnan(base_rate) else float("nan")
 
     return CalibrationMetrics(
         brier=brier,
         auc=auc,
         ece=float(ece),
+        mce=float(max_calibration_error),
         brier_uncertainty=float(uncertainty_component),
         brier_resolution=float(resolution_component),
         brier_reliability=float(reliability_component),
@@ -269,6 +274,12 @@ def probability_calibration_metrics(
     )
 
 
+def pesaran_timmermann(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Wrapper around pt_test for compatibility with diagnostics."""
+
+    return pt_test(actual, predicted)
+
+
 __all__ = [
     "CalibrationMetrics",
     "DieboldMarianoResult",
@@ -277,6 +288,7 @@ __all__ = [
     "diebold_mariano",
     "ljung_box",
     "mincer_zarnowitz",
+    "pesaran_timmermann",
     "probability_calibration_metrics",
     "runs_test",
 ]
