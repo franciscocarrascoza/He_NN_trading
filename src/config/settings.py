@@ -110,15 +110,20 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class StrategyConfig:
+    """Strategy evaluation parameters including gating and friction settings."""  # FIX: document strategy config purpose
+
     thresholds: Tuple[float, ...] = field(default_factory=lambda: (0.55, 0.6))
     confidence_margin: float = 0.1
     kelly_clip: float = 0.5
     use_conformal_gate: bool = True
     conformal_p_min: float = 0.05
+    slippage_bps: float = 0.0  # FIX: allow modelling additional trading friction
 
 
 @dataclass(frozen=True)
 class EvaluationConfig:
+    """Evaluation-stage configuration including conformal controls."""  # FIX: document evaluation config enhancements
+
     alpha: float
     cv_folds: int
     val_block: int
@@ -127,13 +132,18 @@ class EvaluationConfig:
     cost_bps: float
     save_markdown: bool
     n_bins: int = 15
+    conformal_residual: Literal["abs", "std_gauss"] = "abs"  # FIX: select conformal residual transformation
 
 
 @dataclass(frozen=True)
 class ReportingConfig:
+    """Reporting output configuration including annualisation cadence."""  # FIX: document reporting config scope
+
     output_dir: str
     legend_title: str
     date_format: str
+    freq_per_year: int = 8760  # FIX: default to hourly sampling frequency
+    strict_conformal_assert: bool = False  # FIX: control whether coverage deviations raise
 
 
 @dataclass(frozen=True)

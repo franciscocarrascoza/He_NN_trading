@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""Utility helpers for reproducibility and diagnostics."""
+"""Utility helpers for reproducibility and diagnostics."""  # FIX: describe deterministic helpers
 
-import math
-import os
-import random
-import numpy as np
-import torch
+import math  # FIX: expose scalar math for test statistics
+import os  # FIX: environment control for deterministic threading
+import random  # FIX: python RNG seeding
+import numpy as np  # FIX: rely on numpy for vector utilities
+import torch  # FIX: integrate torch seeding alongside numpy
 
 
 def set_seed(seed: int = 42) -> None:
@@ -76,7 +76,7 @@ def pit_zscore(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     y = np.asarray(y, dtype=float)
     mu = np.asarray(mu, dtype=float)
     sigma = np.asarray(sigma, dtype=float)
-    eps = 1e-9
+    eps = 1e-6  # FIX: match conformal stability clamp
     safe_sigma = np.clip(sigma, eps, None)
     return (y - mu) / safe_sigma
 

@@ -111,6 +111,35 @@ def save_sign_scatter(mu: np.ndarray, targets: np.ndarray, *, output_path: Path,
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
+
+def save_mz_scatter(
+    mu: np.ndarray,
+    targets: np.ndarray,
+    *,
+    intercept: float,
+    slope: float,
+    output_path: Path,
+    title: str,
+) -> None:
+    """Plot realised vs predicted returns with Mincer–Zarnowitz fit line."""  # FIX: visualise OLS calibration
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mu_arr = np.asarray(mu, dtype=float).ravel()
+    tgt_arr = np.asarray(targets, dtype=float).ravel()
+    fig, ax = plt.subplots(figsize=(4.5, 4.5))
+    ax.scatter(mu_arr, tgt_arr, alpha=0.4, color="tab:blue", s=16)  # FIX: show realised vs predicted scatter
+    x_vals = np.linspace(mu_arr.min(), mu_arr.max(), 100)  # FIX: evaluation grid for fitted line
+    y_vals = intercept + slope * x_vals  # FIX: fitted response values
+    ax.plot(x_vals, y_vals, color="tab:red", linewidth=1.5, label="MZ fit")  # FIX: overlay fitted line
+    ax.set_xlabel("μ (predicted)")
+    ax.set_ylabel("y (realised)")
+    ax.set_title(title)
+    ax.grid(True, linestyle=":", linewidth=0.5)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
 def save_lr_range_plot(lr_values: np.ndarray, losses: list[float], *, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -127,6 +156,7 @@ def save_lr_range_plot(lr_values: np.ndarray, losses: list[float], *, output_pat
 
 __all__ = [
     "save_lr_range_plot",
+    "save_mz_scatter",
     "save_probability_histogram",
     "save_qq_plot",
     "save_reliability_diagram",
