@@ -24,7 +24,7 @@ os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
 os.environ.setdefault("KMP_CREATE_SHM", "FALSE")
 os.environ.setdefault("KMP_BLOCKTIME", "0")
-os.environ.setdefault("KMP_FORKJOIN_BARRIER", "plain")
+os.environ.setdefault("KMP_FORKJOIN_BARRIER", "2")  # FIX: choose valid barrier mode to silence OpenMP warning
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -1243,6 +1243,10 @@ class HermiteTrainer:
             assert in_band, (  # FIX: enforce runtime assertion per specification
                 f"Conformal coverage {coverage:.4f} not within [{lower_bound:.4f}, {upper_bound:.4f}]"
             )
+            if strict_coverage and not in_band:  # FIX: only raise when explicitly enabled
+                raise AssertionError(
+                    f"Conformal coverage {coverage:.4f} not within [{lower_bound:.4f}, {upper_bound:.4f}]"
+                )
 
         forecast_frame = pd.DataFrame(
             {
