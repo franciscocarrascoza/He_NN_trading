@@ -43,7 +43,12 @@ from src.config import (
     load_config,
 )
 from src.data import BinanceDataFetcher, HermiteDataset
-from src.eval.conformal import conformal_interval, conformal_p_value, compute_conformal_quantile
+from src.eval.conformal import (
+    compute_conformal_quantile,
+    conformal_interval,
+    conformal_p_value,
+    conformal_residuals,
+)  # FIX: utilise enhanced conformal utilities
 from src.eval.diagnostics import (
     CalibrationMetrics,
     binomial_test_pvalue,
@@ -52,7 +57,9 @@ from src.eval.diagnostics import (
     mincer_zarnowitz,
     probability_calibration_metrics,
     runs_test,
-)
+    save_pit_qq_plot,
+    save_sigma_histogram,
+)  # FIX: import enhanced diagnostics plotting helpers
 from src.eval.strategy import StrategyMetrics, StrategySummary, baseline_strategies, evaluate_strategy
 from src.features import compute_liquidity_features_series, compute_orderbook_features_series
 from src.models import HermiteForecaster, ModelOutput
@@ -60,11 +67,11 @@ from src.pipeline.scaler import LeakageGuardScaler, ScalerStats
 from src.pipeline.split import FoldIndices, RollingOriginSplitter
 from src.reporting.plots import (
     save_lr_range_plot,
+    save_mz_scatter,
     save_probability_histogram,
-    save_qq_plot,
     save_reliability_diagram,
     save_sign_scatter,
-)
+)  # FIX: plotting suite without legacy PIT QQ helper
 from src.utils.utils import pit_zscore, pt_test, set_seed
 
 LOGGER = logging.getLogger(__name__)
@@ -321,6 +328,7 @@ class FoldResult:
     calibration_residuals: np.ndarray
     forecast_frame: pd.DataFrame
     predictions_path: Path
+    pit_csv_path: Path  # FIX: track PIT diagnostics export
     reliability_paths: Dict[str, Path]
     extra_plot_paths: Dict[str, Path]
     scaler_stats: ScalerStats
@@ -526,6 +534,12 @@ class HermiteTrainer:
         cfg_train = self.config.training
         cfg_model = self.config.model
         set_seed(cfg_train.seed + fold.fold_id)
+
+        cal_set = set(fold.calibration_idx.tolist())  # FIX: materialise calibration indices for overlap checks
+        if cal_set & set(fold.val_idx.tolist()):  # FIX: validation and calibration must be disjoint
+            raise ValueError("Calibration indices overlap with validation set.")  # FIX: enforce disjointness
+        if cal_set & set(fold.train_idx.tolist()):  # FIX: training and calibration must be disjoint
+            raise ValueError("Calibration indices overlap with training set.")  # FIX: enforce disjointness
 
         scaler = LeakageGuardScaler(max_index=int(fold.scaler_idx[-1].item()))
         scaled_features, stats = scaler.fit_transform(dataset.features, fold.scaler_idx)
@@ -990,7 +1004,8 @@ class HermiteTrainer:
         y_cal_np = cal_targets.squeeze(1).cpu().numpy()
         sigma_cal_np = np.exp(0.5 * logvar_cal_np)
         sigma_cal_np = np.clip(sigma_cal_np, 1e-6, None)
-        cal_residuals = np.abs(y_cal_np - mu_cal_np) / sigma_cal_np
+        residual_kind = self.config.evaluation.conformal_residual  # FIX: load residual encoding from config
+        cal_residuals = conformal_residuals(y_cal_np - mu_cal_np, sigma_cal_np, residual=residual_kind)  # FIX: calibrate residuals consistently
         direction_cal_np = direction_labels_int.index_select(0, fold.calibration_idx).cpu().numpy().astype(int)
         direction_val_np = direction_labels_int.index_select(0, fold.val_idx).cpu().numpy().astype(int)
 
@@ -1093,11 +1108,33 @@ class HermiteTrainer:
                         "method": calibration_method,
                     },
                 )
-        quantile = compute_conformal_quantile(cal_residuals, alpha)
         realised_error = y_val_np - mu_val_np
-        normalized_error = np.abs(realised_error) / sigma_val_np
-        lower, upper = conformal_interval(mu_val_np, quantile * sigma_val_np)
-        p_values = conformal_p_value(cal_residuals, normalized_error)
+        val_residuals = conformal_residuals(realised_error, sigma_val_np, residual=residual_kind)  # FIX: transform validation residuals
+        conformal_residual_val = val_residuals  # FIX: retain residuals for diagnostics export
+        skip_conformal = cal_residuals.size < 256  # FIX: determine if conformal calibration is viable
+        if skip_conformal:  # FIX: enforce minimum calibration depth
+            LOGGER.warning(
+                "Skipping conformal interval due to insufficient calibration sample",
+                extra={
+                    "event": "conformal_skip",
+                    "fold_id": fold.fold_id,
+                    "calibration_size": int(cal_residuals.size),
+                    "required": 256,
+                },
+            )
+            quantile = float("nan")  # FIX: indicate missing quantile
+            lower = np.full_like(mu_val_np, np.nan)  # FIX: propagate skipped intervals
+            upper = np.full_like(mu_val_np, np.nan)  # FIX: propagate skipped intervals
+            p_values = np.ones_like(mu_val_np)  # FIX: default high p-values when skipping
+        else:
+            quantile = compute_conformal_quantile(cal_residuals, alpha)  # FIX: derive quantile from calibrated residuals
+            lower, upper = conformal_interval(
+                mu_val_np,
+                sigma_val_np,
+                quantile,
+                residual=residual_kind,
+            )  # FIX: build intervals respecting residual encoding
+            p_values = conformal_p_value(cal_residuals, val_residuals)  # FIX: compute p-values in matching space
         pit_z = pit_zscore(y_val_np, mu_val_np, sigma_val_np)
 
         anchor_prices = dataset.anchor_prices.index_select(0, fold.val_idx).numpy()
@@ -1145,39 +1182,66 @@ class HermiteTrainer:
             conformal_p=p_values,
             use_conformal_gate=strategy_cfg.use_conformal_gate,
             conformal_p_min=strategy_cfg.conformal_p_min,
+            slippage_bps=strategy_cfg.slippage_bps,  # FIX: pass configured slippage to strategy eval
+            freq_per_year=self.config.reporting.freq_per_year,  # FIX: honour reporting frequency override for Sharpe scaling
         )
         strategy = strategy_summary.best_metrics
+        thresholds_items = list(strategy_summary.per_threshold.items())
+        for idx, (thr_a, metrics_a) in enumerate(thresholds_items):  # FIX: inspect threshold uniqueness
+            for thr_b, metrics_b in thresholds_items[idx + 1 :]:
+                if np.allclose(metrics_a.returns, metrics_b.returns) and np.isclose(metrics_a.turnover, metrics_b.turnover):  # FIX: detect duplicated strategy outputs
+                    LOGGER.warning(
+                        "Identical strategy metrics across thresholds",
+                        extra={
+                            "event": "strategy_threshold_warning",
+                            "fold_id": fold.fold_id,
+                            "threshold_a": thr_a,
+                            "threshold_b": thr_b,
+                        },
+                    )
+                    break
         baselines = baseline_strategies(
             y_val_np,
             cost_bps=cost_bps,
             seconds_per_step=seconds_per_step,
+            slippage_bps=strategy_cfg.slippage_bps,  # FIX: align baseline friction with strategy
+            freq_per_year=self.config.reporting.freq_per_year,  # FIX: align baseline Sharpe scaling with reporting config
         )
 
-        coverage = float(np.mean((y_val_np >= lower) & (y_val_np <= upper)))
-        interval_width = float(np.mean(upper - lower))
-        coverage_warning: Optional[str] = None
+        finite_interval = np.isfinite(lower) & np.isfinite(upper)  # FIX: identify valid conformal bounds
+        if finite_interval.any():  # FIX: only evaluate coverage when intervals exist
+            coverage = float(
+                np.mean(
+                    (y_val_np[finite_interval] >= lower[finite_interval])
+                    & (y_val_np[finite_interval] <= upper[finite_interval])
+                )
+            )  # FIX: restrict to finite intervals
+            interval_width = float(np.mean(upper[finite_interval] - lower[finite_interval]))  # FIX: width on valid subset
+        else:
+            coverage = float("nan")  # FIX: mark coverage unavailable when skipping conformal
+            interval_width = float("nan")  # FIX: propagate absence of intervals
+        coverage_warning: Optional[str] = "insufficient_calibration" if skip_conformal else None  # FIX: flag skipped calibration
         target_coverage = 1.0 - alpha
-        if coverage < 0.85:
-            coverage_warning = "under-dispersion"
-            LOGGER.warning(
-                "Conformal under-dispersion detected",
-                extra={
-                    "event": "conformal_warning",
-                    "fold_id": fold.fold_id,
-                    "coverage": coverage,
-                    "target": target_coverage,
-                },
-            )
-        elif coverage > 0.95:
-            coverage_warning = "over-dispersion"
-            LOGGER.warning(
-                "Conformal over-dispersion detected",
-                extra={
-                    "event": "conformal_warning",
-                    "fold_id": fold.fold_id,
-                    "coverage": coverage,
-                    "target": target_coverage,
-                },
+        tolerance = 0.02  # FIX: enforce ±2% tolerance band
+        lower_bound = target_coverage - tolerance
+        upper_bound = target_coverage + tolerance
+        if not skip_conformal and np.isfinite(coverage):  # FIX: only check tolerance when coverage available
+            in_band = lower_bound <= coverage <= upper_bound  # FIX: capture tolerance compliance
+            if not in_band:  # FIX: emit diagnostics when tolerance violated
+                coverage_warning = "coverage_out_of_band"
+                LOGGER.warning(
+                    "Conformal coverage outside tolerance",
+                    extra={
+                        "event": "conformal_warning",
+                        "fold_id": fold.fold_id,
+                        "coverage": coverage,
+                        "target": target_coverage,
+                        "lower": lower_bound,
+                        "upper": upper_bound,
+                    },
+                )
+            assert in_band, (  # FIX: enforce runtime assertion per specification
+                f"Conformal coverage {coverage:.4f} not within [{lower_bound:.4f}, {upper_bound:.4f}]"
             )
 
         forecast_frame = pd.DataFrame(
@@ -1207,7 +1271,7 @@ class HermiteTrainer:
                 "conformal_lower_price": interval_lower_price,
                 "conformal_upper_price": interval_upper_price,
                 "conformal_p": p_values,
-                "normalized_abs_error": normalized_error,
+                "conformal_residual": conformal_residual_val,
                 "pit_z": pit_z,
             }
         )
@@ -1216,6 +1280,12 @@ class HermiteTrainer:
         timestamp_suffix = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
         predictions_path = predictions_dir / f"predictions_fold_{fold.fold_id}_{timestamp_suffix}.csv"
         forecast_frame.to_csv(predictions_path, index=False)
+        pit_dir = plot_dir.parent / "pit"
+        pit_dir.mkdir(parents=True, exist_ok=True)  # FIX: ensure PIT diagnostics directory exists
+        pit_columns = ["timestamp", "y", "mu", "sigma", "logit", "p_up_raw", "p_up_cal", "conformal_p", "pit_z"]  # FIX: select diagnostic columns
+        pit_frame = forecast_frame[pit_columns]
+        pit_path = pit_dir / f"pit_fold_{fold.fold_id}_{timestamp_suffix}.csv"
+        pit_frame.to_csv(pit_path, index=False)  # FIX: persist compact PIT diagnostics
 
         reliability_paths = {
             "raw": plot_dir / f"reliability_raw_fold_{fold.fold_id}.png",
@@ -1238,12 +1308,27 @@ class HermiteTrainer:
             output_path=hist_path,
             title=f"Probabilities (Fold {fold.fold_id})",
         )
-        qq_path = plot_dir / f"plots_fold_{fold.fold_id}_pit_qq.png"
-        save_qq_plot(
+        sigma_hist_path = plot_dir / f"plots_fold_{fold.fold_id}_sigma_hist.png"  # FIX: output path for sigma histogram
+        save_sigma_histogram(
+            sigma_val_np,
+            output_path=sigma_hist_path,
+            title=f"Sigma Histogram (Fold {fold.fold_id})",
+        )  # FIX: expose predictive dispersion distribution
+        qq_path = plot_dir / f"plots_fold_{fold.fold_id}_pit_qq.png"  # FIX: output path for PIT QQ plot
+        save_pit_qq_plot(
             pit_z,
             output_path=qq_path,
             title=f"PIT QQ Plot (Fold {fold.fold_id})",
-        )
+        )  # FIX: use enhanced PIT QQ diagnostic
+        mz_path = plot_dir / f"plots_fold_{fold.fold_id}_mz_scatter.png"  # FIX: output path for MZ scatter
+        save_mz_scatter(
+            mu_val_np,
+            y_val_np,
+            intercept=mz.intercept,
+            slope=mz.slope,
+            output_path=mz_path,
+            title=f"MZ Scatter (Fold {fold.fold_id})",
+        )  # FIX: visualise OLS calibration fit
         sign_path = plot_dir / f"plots_fold_{fold.fold_id}_sign_scatter.png"
         save_sign_scatter(
             mu_val_np,
@@ -1319,9 +1404,11 @@ class HermiteTrainer:
 
         extra_plot_paths = {
             "prob_hist": hist_path,
+            "sigma_hist": sigma_hist_path,
             "pit_qq": qq_path,
+            "mz_scatter": mz_path,
             "sign_scatter": sign_path,
-        }
+        }  # FIX: track additional diagnostics plots
 
         return FoldResult(
             fold_id=fold.fold_id,
@@ -1343,6 +1430,7 @@ class HermiteTrainer:
             calibration_residuals=cal_residuals,
             forecast_frame=forecast_frame,
             predictions_path=predictions_path,
+            pit_csv_path=pit_path,
             reliability_paths=reliability_paths,
             extra_plot_paths=extra_plot_paths,
             scaler_stats=stats,

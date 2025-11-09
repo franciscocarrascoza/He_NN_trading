@@ -10,6 +10,7 @@ from src.pipeline import HermiteTrainer
 from src.pipeline.split import RollingOriginSplitter
 from src.utils.logging import configure_logging
 from src.utils.repo import forecast_horizon_owner, label_factory_location
+from src.utils.utils import set_seed  # FIX: access deterministic seeding helper
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +96,7 @@ def main() -> None:
     base_config = load_config(args.config) if args.config else APP_CONFIG
     config = apply_overrides(base_config, args)
     configure_logging(config.logging.level)
+    set_seed(config.training.seed)  # FIX: initialise reproducible seed state
 
     if args.print_config:
         trainer = HermiteTrainer(config=config)
