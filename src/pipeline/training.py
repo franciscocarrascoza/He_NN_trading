@@ -1240,10 +1240,8 @@ class HermiteTrainer:
                         "upper": upper_bound,
                     },
                 )
-            strict_coverage = getattr(  # FIX: allow configuration to control assertion strictness
-                self.config.reporting,
-                "strict_conformal_assert",
-                False,
+            assert in_band, (  # FIX: enforce runtime assertion per specification
+                f"Conformal coverage {coverage:.4f} not within [{lower_bound:.4f}, {upper_bound:.4f}]"
             )
             if strict_coverage and not in_band:  # FIX: only raise when explicitly enabled
                 raise AssertionError(

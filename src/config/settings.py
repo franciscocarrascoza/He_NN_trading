@@ -143,7 +143,6 @@ class ReportingConfig:
     legend_title: str
     date_format: str
     freq_per_year: int = 8760  # FIX: default to hourly sampling frequency
-    strict_conformal_assert: bool = False  # FIX: control whether coverage deviations raise
 
 
 @dataclass(frozen=True)

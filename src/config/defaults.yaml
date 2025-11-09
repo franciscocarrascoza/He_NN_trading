@@ -96,7 +96,6 @@ reporting:
   legend_title: "Legend"
   date_format: "%Y-%m-%d"
   freq_per_year: 8760  # FIX: hourly cadence annualisation factor
-  strict_conformal_assert: false  # FIX: disable hard assertion by default to keep UI responsive
 
 logging:
   level: INFO
