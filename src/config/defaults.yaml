@@ -81,18 +81,21 @@ evaluation:
   cost_bps: 5.0
   save_markdown: true
   n_bins: 15
+  conformal_residual: abs  # FIX: default to absolute residual calibration
 
 strategy:
-  thresholds: [0.55, 0.6]
-  confidence_margin: 0.1
+  thresholds: [0.55, 0.60]  # FIX: evaluate both primary confidence thresholds
+  confidence_margin: 0.10  # FIX: minimum calibrated probability deviation
   kelly_clip: 0.5
-  use_conformal_gate: true
-  conformal_p_min: 0.05
+  use_conformal_gate: true  # FIX: enable conformal-informed gating
+  conformal_p_min: 0.05  # FIX: minimum acceptable conformal p-value
+  slippage_bps: 0.0  # FIX: default slippage assumption
 
 reporting:
   output_dir: reports
   legend_title: "Legend"
   date_format: "%Y-%m-%d"
+  freq_per_year: 8760  # FIX: hourly cadence annualisation factor
 
 logging:
   level: INFO

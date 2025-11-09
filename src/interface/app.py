@@ -281,7 +281,7 @@ def run_app() -> None:
         train_col1, train_col2, train_col3 = st.columns(3)
         with train_col1:
             batch_size = st.number_input("Batch size", value=int(TRAINING.batch_size), min_value=8, max_value=1024, step=8)
-            num_epochs = st.number_input("Epochs", value=int(TRAINING.num_epochs), min_value=1, max_value=500)
+            num_epochs = st.number_input("Epochs", value=int(TRAINING.num_epochs), min_value=1)  # FIX: remove hard 500 epoch cap
             learning_rate = st.number_input(
                 "Learning rate", value=float(TRAINING.learning_rate), min_value=1e-6, max_value=1.0, format="%.6f"
             )

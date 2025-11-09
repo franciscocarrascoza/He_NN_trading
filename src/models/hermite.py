@@ -174,7 +174,7 @@ class LSTMTemporalEncoder(nn.Module):
 
 
 class HermiteForecaster(nn.Module):
-    """Probabilistic Hermite forecaster with mean/variance and classification heads."""
+    """Probabilistic Hermite forecaster with stabilised variance and classification heads."""  # FIX: highlight variance clamp
 
     def __init__(
         self,
@@ -265,10 +265,10 @@ class HermiteForecaster(nn.Module):
         features = torch.cat([block_input, symmetric_features, jacobian_trace], dim=-1)
         shared = self.pre_head(features)
         mu = self.mu_head(shared)
-        logvar = self.logvar_head(shared)
+        logvar = self.logvar_head(shared).clamp(min=-10.0, max=5.0)  # FIX: tame log-variance extremes
         logits = self.logit_head(shared)
-        variance = logvar.exp().clamp_min(1e-12)
-        sigma = variance.sqrt()
+        variance = logvar.exp().clamp_min(1e-6)  # FIX: stabilise variance floor
+        sigma = variance.sqrt()  # FIX: compute standard deviation post clamp
         denom = torch.clamp(sigma * SQRT_TWO, min=1e-6)
         p_up_cdf = 0.5 * (1.0 + torch.erf(mu / denom))
         p_up_logit = torch.sigmoid(logits)

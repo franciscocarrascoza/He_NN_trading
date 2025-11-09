@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Utilities to evaluate trained Hermite models on their validation slice."""
+"""Utilities to evaluate trained Hermite models on their validation slice."""  # FIX: extend evaluation with diagnostics
 
 import argparse
 from dataclasses import replace
@@ -11,10 +11,23 @@ import numpy as np
 import pandas as pd
 import torch
 
-from src.config import BINANCE, DATA, FEATURES, MODEL, TRAINING, BinanceAPIConfig, TrainingConfig
+from src.config import (  # FIX: access reporting config for diagnostic outputs
+    BINANCE,
+    DATA,
+    FEATURES,
+    MODEL,
+    REPORTING,
+    TRAINING,
+    BinanceAPIConfig,
+    ReportingConfig,
+    TrainingConfig,
+)
 from src.data import BinanceDataFetcher, HermiteDataset
 from src.features import compute_liquidity_features_series, compute_orderbook_features_series
+from src.eval.diagnostics import mincer_zarnowitz, save_pit_qq_plot, save_sigma_histogram  # FIX: reuse diagnostics helpers
 from src.models import HermiteForecaster
+from src.reporting.plots import save_mz_scatter  # FIX: leverage reporting plot for MZ scatter
+from src.utils.utils import pit_zscore
 
 
 def _load_checkpoint(path: Path) -> Dict[str, torch.Tensor]:
@@ -40,9 +53,10 @@ def evaluate_checkpoint(
     *,
     binance_config: BinanceAPIConfig = BINANCE,
     training_config: TrainingConfig = TRAINING,
+    reporting_config: ReportingConfig = REPORTING,
     csv_output: Path | None = None,
 ) -> Dict[str, float]:
-    """Evaluate a checkpoint and optionally write a per-sample CSV report."""
+    """Evaluate a checkpoint and optionally write a per-sample CSV report."""  # FIX: document reporting integration
 
     checkpoint = _load_checkpoint(checkpoint_path)
     training_config = replace(
@@ -93,8 +107,13 @@ def evaluate_checkpoint(
     with torch.no_grad():
         output = model(dataset.features[val_indices])
     preds = output.mu.squeeze(1).cpu().numpy()
+    logvar = output.logvar.squeeze(1).cpu().numpy()  # FIX: extract log-variance head output
+    variance = np.exp(logvar)  # FIX: convert log-variance to variance domain
+    sigma = np.sqrt(np.clip(variance, 1e-6, None))  # FIX: stabilise sigma extraction
     direction_logits = output.logits.squeeze(1).cpu().numpy()
     direction_probs = output.probability(MODEL.prob_source).squeeze(1).cpu().numpy()
+    prob_raw = output.p_up_logit.squeeze(1).cpu().numpy()  # FIX: capture raw logistic probabilities
+    prob_cdf = output.p_up_cdf.squeeze(1).cpu().numpy()  # FIX: capture Gaussian CDF probabilities
 
     anchor_prices = dataset.anchor_prices[val_indices].numpy()
     true_log_returns = dataset.targets[val_indices].squeeze(1).numpy()
@@ -115,6 +134,10 @@ def evaluate_checkpoint(
     direction_correct = (direction_pred == direction_targets).astype(int)
     hit_rate = float(direction_correct.mean()) if direction_correct.size else float("nan")
 
+    conformal_placeholder = np.full_like(preds, np.nan, dtype=float)  # FIX: no conformal calibration in checkpoint eval
+    pit_z = pit_zscore(true_log_returns, preds, sigma)  # FIX: compute PIT z-scores for diagnostics
+    mz = mincer_zarnowitz(true_log_returns, preds)  # FIX: run Mincer–Zarnowitz regression on evaluation slice
+
     forecast_frame = pd.DataFrame(
         {
             "anchor_time": pd.to_datetime(dataset.anchor_times[val_indices].numpy(), unit="ms", utc=True),
@@ -122,6 +145,7 @@ def evaluate_checkpoint(
             "anchor_price": anchor_prices,
             "true_log_return": true_log_returns,
             "pred_log_return": preds,
+            "pred_mean": preds,  # FIX: expose predictive mean explicitly for diagnostics
             "true_price": true_prices,
             "pred_price": pred_prices,
             "abs_error": abs_err,
@@ -129,12 +153,61 @@ def evaluate_checkpoint(
             "direction_prob": direction_probs,
             "direction_pred": direction_pred,
             "direction_hit": direction_correct,
+            "sigma": sigma,  # FIX: include predictive dispersion
+            "pred_sigma": sigma,  # FIX: duplicate sigma column for PIT export naming
+            "logit": direction_logits,  # FIX: expose directional logits
+            "p_up_raw": prob_raw,  # FIX: raw logistic probabilities
+            "p_up_cal": direction_probs,  # FIX: calibrated probabilities placeholder
+            "p_up_cdf": prob_cdf,  # FIX: Gaussian CDF probabilities
+            "conformal_p": conformal_placeholder,  # FIX: placeholder conformal p-values
+            "pit_z": pit_z,  # FIX: PIT z-score diagnostic
         }
     )
 
     if csv_output is not None:
         csv_output.parent.mkdir(parents=True, exist_ok=True)
         forecast_frame.to_csv(csv_output, index=False)
+
+    report_dir = Path(reporting_config.output_dir).resolve()  # FIX: ensure diagnostics follow reporting location
+    report_dir.mkdir(parents=True, exist_ok=True)  # FIX: allow saving when directory absent
+    pit_dir = report_dir / "pit_eval"  # FIX: dedicate PIT exports subdirectory
+    pit_dir.mkdir(parents=True, exist_ok=True)
+    pit_frame = forecast_frame[[  # FIX: select canonical diagnostic columns
+        "target_time",
+        "true_log_return",
+        "pred_mean",
+        "pred_sigma",
+        "logit",
+        "p_up_raw",
+        "p_up_cal",
+        "conformal_p",
+        "pit_z",
+    ]].rename(
+        columns={
+            "target_time": "timestamp",
+            "true_log_return": "y",
+            "pred_mean": "mu",
+            "pred_sigma": "sigma",
+        }
+    )  # FIX: align with reporting specification
+    pit_path = pit_dir / f"pit_{checkpoint_path.stem}.csv"  # FIX: deterministic PIT output file
+    pit_frame.to_csv(pit_path, index=False)
+
+    plots_dir = report_dir / "plots_eval"  # FIX: dedicated evaluation plots folder
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    sigma_hist_path = plots_dir / f"sigma_hist_{checkpoint_path.stem}.png"  # FIX: sigma histogram path
+    save_sigma_histogram(sigma, output_path=sigma_hist_path, title="Predictive σ Histogram (eval)")  # FIX: persist sigma histogram
+    pit_plot_path = plots_dir / f"pit_qq_{checkpoint_path.stem}.png"  # FIX: PIT QQ path
+    save_pit_qq_plot(pit_z, output_path=pit_plot_path, title="PIT QQ Plot (eval)")  # FIX: persist PIT QQ diagnostic
+    mz_plot_path = plots_dir / f"mz_scatter_{checkpoint_path.stem}.png"  # FIX: scatter path for MZ diagnostics
+    save_mz_scatter(
+        preds,
+        true_log_returns,
+        intercept=mz.intercept,
+        slope=mz.slope,
+        output_path=mz_plot_path,
+        title="Mincer–Zarnowitz Scatter (eval)",
+    )  # FIX: visualise regression fit
 
     metrics = {
         "mae": mae,
@@ -143,6 +216,9 @@ def evaluate_checkpoint(
         "median_ape": median_ape,
         "avg_abs_err_last_10": avg_last10,
         "direction_hit_rate": hit_rate,
+        "mz_intercept": mz.intercept,  # FIX: expose OLS intercept for diagnostics
+        "mz_slope": mz.slope,  # FIX: expose OLS slope for diagnostics
+        "mz_p_value": mz.p_value,  # FIX: expose joint hypothesis p-value
     }
 
     print(

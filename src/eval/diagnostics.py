@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+import torch
+
 from src.utils.utils import pt_test
 
 
@@ -280,6 +283,63 @@ def pesaran_timmermann(actual: np.ndarray, predicted: np.ndarray) -> float:
     return pt_test(actual, predicted)
 
 
+def save_sigma_histogram(sigma: np.ndarray, *, output_path: Path, title: str, bins: int = 30) -> None:
+    """Persist a histogram of predictive σ values for diagnostic review."""  # FIX: provide sigma distribution visualisation
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)  # FIX: ensure plot directory exists
+    import matplotlib
+
+    matplotlib.use("Agg")  # FIX: use non-interactive backend for headless environments
+    import matplotlib.pyplot as plt
+
+    values = np.asarray(sigma, dtype=float).ravel()  # FIX: flatten sigma samples
+    if values.size == 0:  # FIX: guard empty arrays
+        values = np.array([0.0])
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.hist(values, bins=bins, color="tab:green", alpha=0.8)  # FIX: visualise sigma spread
+    ax.set_xlabel("Predictive σ")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+    ax.grid(True, linestyle=":", linewidth=0.5)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def save_pit_qq_plot(pit_z: np.ndarray, *, output_path: Path, title: str) -> None:
+    """Generate a QQ plot comparing PIT z-scores to the standard normal."""  # FIX: assess distributional calibration
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)  # FIX: ensure directories available
+    import matplotlib
+
+    matplotlib.use("Agg")  # FIX: force headless plotting
+    import matplotlib.pyplot as plt
+
+    values = np.asarray(pit_z, dtype=float).ravel()  # FIX: flatten PIT samples
+    if values.size == 0:  # FIX: avoid degenerate QQ plot
+        values = np.array([0.0])
+    sorted_vals = np.sort(values)  # FIX: empirical quantiles
+    probs = (np.arange(1, sorted_vals.size + 1) - 0.5) / max(sorted_vals.size, 1)  # FIX: plotting positions
+    probs = np.clip(probs, 1e-6, 1 - 1e-6)  # FIX: avoid infinite tails
+    theoretical = (
+        torch.distributions.Normal(0.0, 1.0)
+        .icdf(torch.from_numpy(probs.astype(np.float64)))
+        .cpu()
+        .numpy()
+    )  # FIX: compute theoretical quantiles
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(theoretical, sorted_vals, color="tab:purple", alpha=0.7, s=18)  # FIX: scatter QQ points
+    lims = [min(theoretical.min(), sorted_vals.min()), max(theoretical.max(), sorted_vals.max())]  # FIX: shared limits
+    ax.plot(lims, lims, linestyle="--", color="gray")  # FIX: reference line
+    ax.set_xlabel("Theoretical quantiles (N(0,1))")
+    ax.set_ylabel("Empirical quantiles (PIT z)")
+    ax.set_title(title)
+    ax.grid(True, linestyle=":", linewidth=0.5)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 __all__ = [
     "CalibrationMetrics",
     "DieboldMarianoResult",
@@ -289,6 +349,8 @@ __all__ = [
     "ljung_box",
     "mincer_zarnowitz",
     "pesaran_timmermann",
+    "save_pit_qq_plot",
+    "save_sigma_histogram",
     "probability_calibration_metrics",
     "runs_test",
 ]
