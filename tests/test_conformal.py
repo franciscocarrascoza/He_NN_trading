@@ -17,6 +17,7 @@ from src.eval.conformal import conformal_interval, conformal_p_value, compute_co
 
 
 def test_conformal_interval_coverage() -> None:
+    """Test conformal interval construction and p-value computation."""  # FIX: add docstring
     rng = np.random.default_rng(1234)
     alpha = 0.1
     mu = rng.normal(loc=0.001, scale=0.02, size=400)
@@ -28,13 +29,13 @@ def test_conformal_interval_coverage() -> None:
 
     sigma_cal = np.full_like(cal_mu, 0.02)
     sigma_val = np.full_like(val_mu, 0.02)
-    residuals = np.abs(cal_y - cal_mu) / sigma_cal
-    quantile = compute_conformal_quantile(residuals, alpha)
-    lower, upper = conformal_interval(val_mu, quantile * sigma_val)
+    from src.eval.conformal import conformal_residuals  # FIX: import residual transformation
+    residuals_cal = conformal_residuals(cal_y - cal_mu, sigma_cal, residual="abs")  # FIX: use new residual API
+    quantile = compute_conformal_quantile(residuals_cal, alpha)
+    lower, upper = conformal_interval(val_mu, sigma_val, quantile, residual="abs")  # FIX: use new conformal_interval API
     coverage = np.mean((val_y >= lower) & (val_y <= upper))
-    assert 0.82 <= coverage <= 0.97
+    assert 0.82 <= coverage <= 0.97  # FIX: validate empirical coverage
 
-    realised_error = val_y - val_mu
-    normalized_error = np.abs(realised_error) / sigma_val
-    p_values = conformal_p_value(residuals, normalized_error)
-    assert np.all((p_values >= 0.0) & (p_values <= 1.0))
+    residuals_val = conformal_residuals(val_y - val_mu, sigma_val, residual="abs")  # FIX: transform validation residuals
+    p_values = conformal_p_value(residuals_cal, residuals_val)  # FIX: compute p-values in transformed space
+    assert np.all((p_values >= 0.0) & (p_values <= 1.0))  # FIX: validate p-value domain

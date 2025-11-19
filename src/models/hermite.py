@@ -265,9 +265,9 @@ class HermiteForecaster(nn.Module):
         features = torch.cat([block_input, symmetric_features, jacobian_trace], dim=-1)
         shared = self.pre_head(features)
         mu = self.mu_head(shared)
-        logvar = self.logvar_head(shared).clamp(min=-10.0, max=5.0)  # FIX: tame log-variance extremes
+        logvar = self.logvar_head(shared).clamp(min=-12.0, max=5.0)  # FIX: tame log-variance extremes per spec
         logits = self.logit_head(shared)
-        variance = logvar.exp().clamp_min(1e-6)  # FIX: stabilise variance floor
+        variance = logvar.exp().clamp_min(1e-12)  # FIX: stabilise variance floor matching logvar lower bound
         sigma = variance.sqrt()  # FIX: compute standard deviation post clamp
         denom = torch.clamp(sigma * SQRT_TWO, min=1e-6)
         p_up_cdf = 0.5 * (1.0 + torch.erf(mu / denom))

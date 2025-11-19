@@ -133,6 +133,7 @@ class EvaluationConfig:
     save_markdown: bool
     n_bins: int = 15
     conformal_residual: Literal["abs", "std_gauss"] = "abs"  # FIX: select conformal residual transformation
+    min_calib_size: int = 256  # FIX: minimum calibration samples for stable conformal quantile
 
 
 @dataclass(frozen=True)

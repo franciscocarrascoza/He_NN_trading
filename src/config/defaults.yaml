@@ -62,10 +62,10 @@ training:
   lr_range_max: 0.1
   lr_range_steps: 60
   enable_class_downsample: false
-  reg_weight: 1.0
-  cls_weight: 1.0
-  unc_weight: 0.5
-  sign_hinge_weight: 0.05
+  reg_weight: 1.0  # FIX: regression NLL weight per spec
+  cls_weight: 1.0  # FIX: classification BCE/focal weight per spec
+  unc_weight: 0.5  # FIX: uncertainty regularization weight per spec
+  sign_hinge_weight: 0.03  # FIX: sign-consistency auxiliary loss weight per spec
   use_cv: true
   cv_folds: 5
   early_stop_metric: AUC
@@ -77,6 +77,7 @@ evaluation:
   cv_folds: 5
   val_block: 128
   calibration_fraction: 0.1
+  min_calib_size: 256  # FIX: minimum calibration samples for conformal quantile stability
   threshold: 0.55
   cost_bps: 5.0
   save_markdown: true

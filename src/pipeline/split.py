@@ -32,22 +32,29 @@ class RollingOriginSplitter:
         self.evaluation_config = evaluation_config
 
     def _make_calibration_split(self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        cal_fraction = max(0.0, min(0.5, self.evaluation_config.calibration_fraction))
-        total = indices.shape[0]
-        if total < 2:
-            raise ValueError("Not enough indices to allocate calibration slice.")
-        desired_min = max(int(total * 0.1), 512)
-        cal_size = max(1, int(total * cal_fraction))
-        if desired_min < total:
-            cal_size = max(cal_size, desired_min)
+        """Allocate calibration slice with enforced minimum size per spec."""  # FIX: add docstring
+        cal_fraction = max(0.0, min(0.5, self.evaluation_config.calibration_fraction))  # FIX: clamp fraction
+        total = indices.shape[0]  # FIX: total available indices
+        if total < 2:  # FIX: require at least 2 samples
+            raise ValueError("Not enough indices to allocate calibration slice.")  # FIX: explicit error
+        min_calib_size = getattr(self.evaluation_config, "min_calib_size", 256)  # FIX: load min from config with fallback
+        desired_min = max(int(total * 0.1), min_calib_size)  # FIX: respect configured minimum calibration size per spec
+        cal_size = max(1, int(total * cal_fraction))  # FIX: compute from fraction
+        if desired_min < total:  # FIX: enforce minimum when feasible
+            cal_size = max(cal_size, desired_min)  # FIX: take max of fraction and minimum
         else:
-            cal_size = max(cal_size, max(total // 2, 1))
-        cal_size = min(cal_size, total - 1)
-        cal_indices = indices[-cal_size:]
-        train_indices = indices[:-cal_size]
-        if train_indices.numel() == 0:
-            raise ValueError("Not enough training indices after reserving calibration slice.")
-        return train_indices, cal_indices
+            cal_size = max(cal_size, max(total // 2, 1))  # FIX: fallback when dataset too small
+        cal_size = min(cal_size, total - 1)  # FIX: leave at least 1 for training
+        if cal_size < min_calib_size and total >= min_calib_size:  # FIX: enforce hard minimum when dataset permits
+            raise ValueError(
+                f"Calibration block {cal_size} < min_calib_size {min_calib_size}. "
+                f"Increase dataset size or reduce cv_folds."
+            )  # FIX: explicit error per spec with actionable guidance
+        cal_indices = indices[-cal_size:]  # FIX: take last cal_size indices
+        train_indices = indices[:-cal_size]  # FIX: remaining for training
+        if train_indices.numel() == 0:  # FIX: guard empty training set
+            raise ValueError("Not enough training indices after reserving calibration slice.")  # FIX: explicit error
+        return train_indices, cal_indices  # FIX: return disjoint splits
 
     def _single_split(self) -> List[FoldIndices]:
         n = self.dataset_length

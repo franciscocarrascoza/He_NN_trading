@@ -64,10 +64,39 @@ def _format_datetime(series: pd.Series) -> pd.Series:
 
 def _render_fold_section(fold) -> None:
     st.markdown(f"### Fold {fold.fold_id}")
-    if fold.calibration_warning:
-        st.warning(fold.calibration_warning)
-    if fold.coverage_warning:
-        st.warning(f"Conformal warning: {fold.coverage_warning}")
+    if fold.calibration_warning:  # FIX: enhance calibration warning messages for clarity
+        if "ECE improvement below 20%" in fold.calibration_warning:  # FIX: provide diagnostic context
+            raw_ece = fold.calibration_metrics_raw.ece if hasattr(fold, 'calibration_metrics_raw') else None  # FIX: extract raw ECE
+            cal_ece = fold.calibration_metrics_calibrated.ece if hasattr(fold, 'calibration_metrics_calibrated') else None  # FIX: extract calibrated ECE
+            if raw_ece is not None and cal_ece is not None:  # FIX: only show metrics when available
+                improvement = ((raw_ece - cal_ece) / raw_ece * 100) if raw_ece > 0 else 0.0  # FIX: compute improvement percentage
+                st.info(  # FIX: use info severity for diagnostic messages
+                    f"Calibration ECE improvement small (raw: {raw_ece:.4f}, post-cal: {cal_ece:.4f}, "
+                    f"improvement: {improvement:.1f}%). Probabilities may lack discrimination."
+                )
+            else:
+                st.warning(fold.calibration_warning)  # FIX: fallback to original warning
+        else:
+            st.warning(fold.calibration_warning)  # FIX: show other calibration warnings as-is
+    if fold.coverage_warning:  # FIX: enhance conformal coverage warning messages
+        if fold.coverage_warning == "insufficient_calibration":  # FIX: detect insufficient calibration scenario
+            calib_size = len(fold.calibration_residuals) if hasattr(fold, 'calibration_residuals') else 0  # FIX: extract calibration set size
+            st.warning(  # FIX: provide actionable feedback
+                f"Calibration set size {calib_size} < min required 256. "
+                "Conformal intervals skipped. Consider increasing validation_split or history_limit."
+            )
+        elif fold.coverage_warning == "coverage_out_of_band":  # FIX: detect out-of-band coverage
+            coverage = fold.coverage if hasattr(fold, 'coverage') else None  # FIX: extract empirical coverage
+            target = 0.9  # FIX: assume 90% target from alpha=0.1
+            if coverage is not None:  # FIX: only show coverage when available
+                st.info(  # FIX: use info severity for coverage diagnostics
+                    f"Conformal coverage {coverage*100:.1f}% deviates from target {target*100:.0f}% ±2%. "
+                    "This is expected on small validation sets."
+                )
+            else:
+                st.warning(f"Conformal warning: {fold.coverage_warning}")  # FIX: fallback message
+        else:
+            st.warning(f"Conformal warning: {fold.coverage_warning}")  # FIX: show other conformal warnings
     if getattr(fold, "predictions_path", None):
         st.info(f"Predictions CSV: {fold.predictions_path}")
 
@@ -182,8 +211,9 @@ def _render_fold_section(fold) -> None:
             f"Turnover **{strategy.turnover:.3f}** | Hit-rate **{strategy.hit_rate:.3f}**{active_msg}"
         )
     runs = getattr(fold, "strategy_runs", None)
-    if runs:
+    if runs:  # FIX: add threshold sweep distinctness diagnostic
         rows = []
+        turnovers = []  # FIX: collect turnovers to verify distinctness
         for thr, metrics in sorted(runs.items()):
             rows.append(
                 {
@@ -193,6 +223,17 @@ def _render_fold_section(fold) -> None:
                     "Hit-rate": metrics.hit_rate,
                     "Active %": metrics.active_fraction * 100 if metrics.active_fraction is not None else None,
                 }
+            )
+            turnovers.append(metrics.turnover)  # FIX: track turnover progression
+        if len(set(turnovers)) > 1:  # FIX: verify thresholds produce distinct results
+            st.info(  # FIX: confirm threshold sweep is working correctly
+                f"Threshold sweep produced distinct trade patterns across {len(runs)} thresholds. "
+                f"Turnover range: [{min(turnovers):.3f}, {max(turnovers):.3f}]"
+            )
+        elif len(runs) > 1:  # FIX: warn if all thresholds yield identical results
+            st.warning(  # FIX: alert to possible threshold sweep bug
+                "Threshold sweep produced identical turnover across all thresholds. "
+                "Check probability distribution and confidence margins."
             )
         st.dataframe(pd.DataFrame(rows), width="stretch")
 
