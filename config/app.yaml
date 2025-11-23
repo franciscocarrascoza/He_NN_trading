@@ -1,0 +1,32 @@
+# FIX: Desktop application configuration extending defaults.yaml per spec
+# FIX: This file contains desktop-specific configuration keys for data ingestion, UI, and Optuna readiness
+
+data:
+  storage_path: "./data"  # FIX: base storage path for OHLCV Parquet files per spec
+  poll_interval_seconds: 60  # FIX: REST API polling interval for live updates per spec
+  max_backfill_years: 8  # FIX: maximum historical backfill window per spec
+  min_samples_to_train: 8192  # FIX: minimum candles required before training per spec
+  min_calib_size: 256  # FIX: minimum calibration set size for stable conformal quantiles per spec
+
+training:
+  batch_size: 512  # FIX: training batch size per spec
+  val_frac: 0.2  # FIX: validation fraction per spec
+  test_frac: 0.1  # FIX: test fraction per spec (not used in ROCV)
+  seed: 42  # FIX: reproducibility seed per spec
+  forecast_horizon: 1  # FIX: default forecast horizon per spec
+  use_cv: true  # FIX: enable cross-validation by default per spec
+  cv_folds: 5  # FIX: number of CV folds per spec
+
+evaluation:
+  conformal_alpha: 0.10  # FIX: conformal miscoverage level per spec (90% coverage)
+  residual_kind: "std_gauss"  # FIX: default to standardized Gaussian residuals per spec
+  p_up_source: "cdf"  # FIX: default probability source (CDF vs logit) per spec
+
+ui:
+  default_timeframe: "1h"  # FIX: default chart timeframe per spec
+  auto_refresh_seconds: 60  # FIX: auto-refresh interval for chart and metrics per spec
+  layout_file: "config/ui_layout.json"  # FIX: path to UI layout JSON per spec
+
+optuna:
+  enabled: false  # FIX: disable Optuna by default (skeleton only) per spec
+  storage_url: "sqlite:///storage/optuna_studies.db"  # FIX: SQLite storage for Optuna trials per spec
