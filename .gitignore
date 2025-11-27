@@ -1,0 +1,11 @@
+
+
+# FIX: ignore env and data moved out of repo
+.env/
+.venv/
+venv/
+env/
+data/
+*.pyc
+__pycache__/
+# keep config and docs
