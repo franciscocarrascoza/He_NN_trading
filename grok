@@ -1,0 +1,82 @@
+You are Codex, an expert AI code generator specialized in Python for machine learning and
+  time-series forecasting. Your task is to generate modified code files based on the
+  provided analysis of an existing Bitcoin price predictor repository. The original code
+  uses a Hermite polynomial-based neural network for hourly BTCUSDT futures predictions,
+  with features from candles, liquidity, and order books. It trains on log-returns with
+  Huber loss for regression, BCE for classification (direction), and NLL for uncertainty,
+  evaluated on metrics like DirAcc, AUC, MZ, Brier, Sharpe, etc.
+
+  ### Current Results and Weaknesses
+  From the evaluation (horizon=1, folds=1):
+  - DirAcc=0.484 (near-random), AUC=0.461 (worse than random).
+  - MZ_slope=-0.0016 (negative, suggesting inversion or anti-correlation), MZ_F_p=0.0
+  (biased).
+  - Brier_resolution=0.00025 (tiny, probs add no separation; Brier~0.25 random).
+  - Sharpe_strategy=NaN (no trades, turnover=0), baselines poor (long=-5.55 in down
+  market).
+  - Errors: ~3% sMAPE decent, but $3.4k MAE_price high due to BTC scale.
+
+  Causes (from analysis):
+  - Feedforward Hermite model lacks temporal modeling for directions/trends.
+  - Classification head underweighted (cls_weight=0.5 vs. reg=1.0), probs cluster ~0.5.
+  - No use of logvar for probs/resolution; potential training bias in downtrending val
+  data.
+  - Strategy thresholds too conservative, leading to no signals.
+  - Single fold; noisy hourly data (~3000 samples).
+
+  ### Goals
+  Implement fixes to improve directionality, calibration, and trading utility while
+  preserving strengths (e.g., beats zero benchmark on DM errors, good conformal coverage
+  ~90%). Generate updated files or patches for: hermite.py (model), training.py (loss/
+  training), evaluate.py (probs/strategy), split.py (CV), and a new utils.py if needed.
+  Keep code modular, use existing configs (e.g., TrainingConfig), and ensure no data
+  leakage.
+
+  ### Step-by-Step Instructions
+  1. **Enhance Model Architecture (hermite.py)**:
+     - Add a simple LSTM layer before the pre_head to capture temporal dependencies in
+  windowed features. Input: features (batch, input_dim), reshape window parts to (batch,
+  window, feats_per_step) for LSTM.
+     - Initialize Hermite coeffs positively (e.g., abs(randn)*0.1) to reduce inversion
+  risk.
+     - Use logvar to compute p_up via CDF: p_up = 0.5 * (1 + erf(mu / sqrt(2*exp(logvar))))
+  for better resolution from uncertainty.
+     - Update forward to return mu, logvar, p_up (from CDF), logits (keep for BCE).
+
+  2. **Improve Training (training.py)**:
+     - Increase cls_weight to 1.0 (balance with reg=1.0) and unc_weight to 0.5 for better
+  direction/resolution.
+     - Add MZ regularization: During training, periodically compute MZ on batch, add loss
+  term like 0.1 * ( (intercept-0)^2 + (slope-1)^2 ).
+     - Use rolling CV (set use_cv=True, cv_folds=5) from split.py for robustness.
+     - Add early stopping on val DirAcc/AUC if <0.5 after 10 epochs.
+     - In _train_epoch, add sign-specific aux loss: hinge on sign(mu) vs. sign(targets).
+
+  3. **Refine Evaluation and Calibration (evaluate.py, diagnostics.py)**:
+     - Use new CDF p_up in direction_probs.
+     - Add post-calibration with IsotonicRegression on cal set for probs.
+     - Compute raw/calibrated metrics as before, but add p_up from logvar if mu-based.
+     - In probability_calibration_metrics, increase n_bins=15 for finer ECE.
+
+  4. **Optimize Strategy (strategy.py)**:
+     - Lower threshold to 0.55 (from implied 0.5) for more signals.
+     - Add confidence filter: Trade only if abs(p_up - 0.5) > 0.1 and conformal p-value
+  >0.05.
+     - Compute Kelly fraction: position = (2*p_up - 1) clipped to [-1,1].
+     - Evaluate multiple thresholds (0.55, 0.6) and report best Sharpe.
+
+  5. **Data and Scaling (dataset.py, scaler.py)**:
+     - In dataset.py, add trend features (e.g., EMA of log_ret_close) to help direction.
+     - In scaler.py, ensure no inversion by clamping std min=1e-6 (already done).
+
+  6. **General**:
+     - Set seed=42 everywhere for reproducibility.
+     - In reporting (training.py's Reporter), add plots for prob histograms and sign
+  correlations.
+     - Test on synthetic upward-trending data from binance_fetcher.py to verify fixes.
+     - Output: For each modified file, provide full updated code. If unchanged, note "No
+  changes". Add comments with "FIX:" for modifications.
+
+  Generate the code now. Use Python 3.10+, torch 2.0+, and match original style
+  (dataclasses, typing).
+

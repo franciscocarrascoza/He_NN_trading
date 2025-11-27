@@ -1,0 +1,24 @@
+# FIX: Ignore relocated environment and data
+.env/
+.venv/
+venv/
+env/
+data/
+
+# FIX: Ignore Python cache
+*.pyc
+__pycache__/
+
+# FIX: Ignore backup files
+*.bundle
+repo_backups/
+repo_cleanup_backup/
+
+# FIX: Ignore build artifacts
+ui/desktop/build/
+*.o
+*.so
+
+# FIX: Keep config and docs
+!config/
+!docs/

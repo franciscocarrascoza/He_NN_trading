@@ -1,0 +1,102 @@
+binance:
+  symbol: BTCUSDT
+  interval: 1h
+  history_limit: 1500
+  max_klines_per_request: 1500
+  futures_base_url: https://fapi.binance.com
+  spot_base_url: https://api.binance.com
+  order_book_limit: 100
+  long_short_period: 5m
+  liquidation_bins: 200
+  liquidation_price_range: 0.75
+
+data:
+  feature_window: 64
+  forecast_horizon: 1
+  validation_split: 0.2
+  use_extras: false
+  extras_time_aligned: false
+  momentum_windows: [8, 24, 64]
+  volatility_windows: [8, 24, 64]
+  autocorr_window: 32
+  drawdown_window: 64
+
+features:
+  liquidity_bins: 180
+  liquidity_price_range: 0.6
+  liquidity_smoothing_sigma: 5.0
+  liquidity_top_k: 10
+  order_book_depth: 20
+  add_ema: true
+  ema_windows: [6, 12, 24]
+
+model:
+  hermite_degree: 5
+  hermite_maps_a: 2
+  hermite_maps_b: 2
+  hermite_hidden_dim: 64
+  dropout: 0.1
+  use_lstm: true
+  lstm_hidden: 64
+  hermite_version: probabilist
+  prob_source: cdf
+
+training:
+  batch_size: 64
+  learning_rate: 0.001
+  num_epochs: 25
+  weight_decay: 1.0e-5
+  gradient_clip: 1.0
+  lambda_bce: 0.25
+  seed: 42
+  device_preference: RTX 2060
+  classification_loss: bce
+  auto_pos_weight: true
+  focal_gamma: 2.0
+  min_pos_weight_samples: 128
+  optimizer: adamw
+  scheduler: onecycle
+  scheduler_warmup_pct: 0.1
+  enable_lr_range_test: false
+  lr_range_min: 1.0e-5
+  lr_range_max: 0.1
+  lr_range_steps: 60
+  enable_class_downsample: false
+  reg_weight: 1.0  # FIX: regression NLL weight per spec
+  cls_weight: 1.0  # FIX: classification BCE/focal weight per spec
+  unc_weight: 0.5  # FIX: uncertainty regularization weight per spec
+  sign_hinge_weight: 0.03  # FIX: sign-consistency auxiliary loss weight per spec
+  use_cv: true
+  cv_folds: 5
+  early_stop_metric: AUC
+  patience: 10
+  min_delta: 0.0001
+
+evaluation:
+  alpha: 0.1
+  cv_folds: 5
+  val_block: 128
+  calibration_fraction: 0.1
+  min_calib_size: 256  # FIX: minimum calibration samples for conformal quantile stability
+  threshold: 0.55
+  cost_bps: 5.0
+  save_markdown: true
+  n_bins: 15
+  conformal_residual: abs  # FIX: default to absolute residual calibration
+
+strategy:
+  thresholds: [0.55, 0.60]  # FIX: evaluate both primary confidence thresholds
+  confidence_margin: 0.10  # FIX: minimum calibrated probability deviation
+  kelly_clip: 0.5
+  use_conformal_gate: true  # FIX: enable conformal-informed gating
+  conformal_p_min: 0.05  # FIX: minimum acceptable conformal p-value
+  slippage_bps: 0.0  # FIX: default slippage assumption
+
+reporting:
+  output_dir: reports
+  legend_title: "Legend"
+  date_format: "%Y-%m-%d"
+  freq_per_year: 8760  # FIX: hourly cadence annualisation factor
+
+logging:
+  level: INFO

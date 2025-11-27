@@ -1,0 +1,47 @@
+{
+  "_comment": "FIX: UI layout configuration with percent-based dimensions per spec",
+  "version": "1.0",
+  "panels": {
+    "chart": {
+      "percent_width": 60.0,
+      "percent_height": 70.0,
+      "position": "left"
+    },
+    "metrics": {
+      "percent_width": 40.0,
+      "percent_height": 30.0,
+      "position": "right-top"
+    },
+    "predictions_list": {
+      "percent_width": 40.0,
+      "percent_height": 40.0,
+      "position": "right-mid"
+    },
+    "control": {
+      "percent_width": 40.0,
+      "percent_height": 30.0,
+      "position": "right-bottom"
+    },
+    "status_bar": {
+      "percent_width": 100.0,
+      "percent_height": 5.0,
+      "position": "bottom"
+    }
+  },
+  "fonts": {
+    "default_family": "Arial",
+    "default_size": 10,
+    "title_size": 12,
+    "header_size": 11,
+    "code_family": "Courier New",
+    "code_size": 9
+  },
+  "colors": {
+    "background": "#1e1e1e",
+    "foreground": "#ffffff",
+    "chart_up": "#00ff00",
+    "chart_down": "#ff0000",
+    "prediction_arrow": "#ffaa00",
+    "conformal_band": "#3399ff"
+  }
+}
