@@ -1,0 +1,31 @@
+# BEST CONFIG — Score: -1000.000
+model:
+  hermite_version: probabilist
+  hermite_degree: 7
+  hermite_maps_a: 7
+  hermite_maps_b: 2
+  hermite_hidden_dim: 128
+  dropout: 0.117
+  use_lstm: True
+  lstm_hidden: 48
+  prob_source: pdf
+
+training:
+  lr: 1.02e-04
+  batch_size: 512
+  reg_weight: 0.947
+  cls_weight: 0.305
+  unc_weight: 0.695
+  sign_hinge_weight: 1.202
+  weight_decay: 1.07e-02
+  grad_clip: 1.00
+  classification_loss: focal
+  focal_gamma: 2.708
+
+data:
+  feature_window: 252
+
+evaluation:
+  threshold: 0.639
+  confidence_margin: 0.080
+  kelly_clip: 0.896

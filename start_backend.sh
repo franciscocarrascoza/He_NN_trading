@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# FIX: Start the He_NN Trading Backend Server with relocated virtualenv
+# FIX: Start the He_NN Trading Backend Server with conda environment
 set -e  # FIX: exit on any error
 
-# FIX: Set environment path from config or use default
-export ENV_PATH="${ENV_PATH:-$HOME/.anaconda3/envs/binance_env}"  # FIX: default to working conda environment
+# FIX: Initialize conda for bash shell
+eval "$(conda shell.bash hook)"  # FIX: initialize conda
+
+# FIX: Set environment name from config or use default
+export ENV_NAME="${ENV_NAME:-binance_env}"  # FIX: default to binance_env
 
 # FIX: Activate conda environment
-if [ -f "$ENV_PATH/bin/python" ]; then
-  # FIX: For conda environments, use conda activate or directly set PATH
-  export PATH="$ENV_PATH/bin:$PATH"  # FIX: add conda env to PATH
-  echo "✓ Conda environment activated from $ENV_PATH"  # FIX: confirmation message
+echo "Activating conda environment: $ENV_NAME"  # FIX: startup message
+conda activate "$ENV_NAME"  # FIX: activate conda environment
+
+if [ $? -eq 0 ]; then
+  echo "✓ Conda environment '$ENV_NAME' activated successfully"  # FIX: confirmation message
 else
-  echo "ERROR: Conda environment not found at $ENV_PATH" >&2  # FIX: error message
-  echo "Please ensure the conda environment exists at $ENV_PATH" >&2  # FIX: hint
+  echo "ERROR: Failed to activate conda environment '$ENV_NAME'" >&2  # FIX: error message
+  echo "Please ensure the environment exists. Run: conda env list" >&2  # FIX: hint
   exit 1  # FIX: exit with error
 fi
 

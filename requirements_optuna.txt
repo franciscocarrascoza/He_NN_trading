@@ -1,0 +1,27 @@
+# Optuna Hyperparameter Optimization Dependencies
+
+# Core Optuna
+optuna>=3.5.0
+
+# Visualization (optional but recommended)
+optuna-dashboard>=0.15.0
+
+# Database backend (SQLite included in Python, but PostgreSQL/MySQL optional)
+# psycopg2-binary>=2.9.0  # For PostgreSQL backend
+# PyMySQL>=1.1.0  # For MySQL backend
+
+# Integration with ML frameworks (already in base requirements)
+# torch>=2.0.0
+# numpy>=1.24.0
+# pandas>=2.0.0
+
+# Progress bar and logging
+tqdm>=4.66.0
+colorlog>=6.8.0
+
+# Plotting libraries for study visualization
+plotly>=5.18.0
+kaleido>=0.2.1  # For static image export
+
+# Statistical analysis
+scikit-learn>=1.3.0  # For additional metrics

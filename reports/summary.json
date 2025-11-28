@@ -1,118 +1,118 @@
 {
-  "generated_at": "2025-11-25T15:49:24.916055+00:00",
+  "generated_at": "2025-11-28T17:29:24.971012+00:00",
   "folds": 5,
   "fold_metrics": [
     {
       "fold_id": 0,
-      "DirAcc": 0.4609375,
-      "AUC": 0.4785714285714286,
-      "MZ_intercept": 0.0002814680042955874,
-      "MZ_slope": -0.010850823865465034,
+      "DirAcc": 0.5546875,
+      "AUC": 0.5563743551952837,
+      "MZ_intercept": -0.0006331801527424582,
+      "MZ_slope": 0.0008611330227582024,
       "MZ_F_p": 0.0,
-      "PT_p": 0.5478739053342907,
-      "Brier": 0.25130265060180124,
-      "Brier_uncertainty": 0.247802734375,
-      "Brier_resolution": 0.001616710752952756,
-      "Brier_reliability": 0.0045374502246470026,
-      "Sharpe_strategy": NaN,
+      "PT_p": 0.33574449979951326,
+      "Brier": 0.24917270319737855,
+      "Brier_uncertainty": 0.24847412109375,
+      "Brier_resolution": 0.004193910469780786,
+      "Brier_reliability": 0.006260428896340577,
+      "Sharpe_strategy": 8.192956530950795,
       "Strategy_best_threshold": 0.55,
-      "Conf_Coverage@90%": 0.5859375,
-      "Conf_Width@90%": 0.19727659225463867
+      "Conf_Coverage@90%": 0.796875,
+      "Conf_Width@90%": 0.22481751441955566
     },
     {
       "fold_id": 1,
-      "DirAcc": 0.515625,
-      "AUC": 0.5086860778076829,
-      "MZ_intercept": -0.00042841710816025,
-      "MZ_slope": 0.002427943421508412,
+      "DirAcc": 0.5390625,
+      "AUC": 0.6012210012210012,
+      "MZ_intercept": 0.00043868409543520526,
+      "MZ_slope": 0.014714529917520184,
       "MZ_F_p": 0.0,
-      "PT_p": 0.9728572608537766,
-      "Brier": 0.2494611276730559,
-      "Brier_uncertainty": 0.24945068359375,
-      "Brier_resolution": 0.0001332396740333532,
-      "Brier_reliability": 0.000147702496399281,
+      "PT_p": 0.47562493926112653,
+      "Brier": 0.24906691776666984,
+      "Brier_uncertainty": 0.24993896484375,
+      "Brier_resolution": 0.0,
+      "Brier_reliability": 5.273246687014866e-06,
       "Sharpe_strategy": NaN,
       "Strategy_best_threshold": 0.55,
-      "Conf_Coverage@90%": 0.8515625,
-      "Conf_Width@90%": 0.07180856913328171
+      "Conf_Coverage@90%": 1.0,
+      "Conf_Width@90%": 0.3361205756664276
     },
     {
       "fold_id": 2,
-      "DirAcc": 0.484375,
-      "AUC": 0.5635386119257088,
-      "MZ_intercept": -0.002262503638067983,
-      "MZ_slope": 0.2252343064473947,
-      "MZ_F_p": 1.961335436886297e-126,
-      "PT_p": 1.0,
-      "Brier": 0.2499979889144184,
-      "Brier_uncertainty": 0.249755859375,
-      "Brier_resolution": 0.0,
-      "Brier_reliability": 0.00027656588202577153,
+      "DirAcc": 0.5,
+      "AUC": 0.592610716907267,
+      "MZ_intercept": 0.0011315055234333861,
+      "MZ_slope": 0.039184621739685226,
+      "MZ_F_p": 0.0,
+      "PT_p": 0.725171053623727,
+      "Brier": 0.2508610819846865,
+      "Brier_uncertainty": 0.24945068359375,
+      "Brier_resolution": 0.0033367775049987117,
+      "Brier_reliability": 0.0043110677939858285,
       "Sharpe_strategy": NaN,
       "Strategy_best_threshold": 0.55,
-      "Conf_Coverage@90%": 0.9765625,
-      "Conf_Width@90%": 0.04301832243800163
+      "Conf_Coverage@90%": 0.9296875,
+      "Conf_Width@90%": 0.06504596024751663
     },
     {
       "fold_id": 3,
-      "DirAcc": 0.5546875,
-      "AUC": 0.6022058823529411,
-      "MZ_intercept": -2.7768209037475662e-05,
-      "MZ_slope": -0.01171579530062443,
-      "MZ_F_p": 3.75713847533589e-77,
-      "PT_p": 0.34417397280246775,
-      "Brier": 0.24836933524456178,
-      "Brier_uncertainty": 0.2490234375,
-      "Brier_resolution": 0.022370957578605605,
-      "Brier_reliability": 0.021415741224728523,
-      "Sharpe_strategy": 12.431297470033213,
+      "DirAcc": 0.4921875,
+      "AUC": 0.5404942500611696,
+      "MZ_intercept": 0.00020586329029251602,
+      "MZ_slope": 0.042763403293221716,
+      "MZ_F_p": 0.0,
+      "PT_p": 0.7660558102245324,
+      "Brier": 0.2513793721329029,
+      "Brier_uncertainty": 0.24945068359375,
+      "Brier_resolution": 7.308706393572859e-05,
+      "Brier_reliability": 0.0033668042987637847,
+      "Sharpe_strategy": NaN,
       "Strategy_best_threshold": 0.55,
-      "Conf_Coverage@90%": 0.890625,
-      "Conf_Width@90%": 0.019677598029375076
+      "Conf_Coverage@90%": 1.0,
+      "Conf_Width@90%": 0.21503950655460358
     },
     {
       "fold_id": 4,
-      "DirAcc": 0.578125,
-      "AUC": 0.6028002947678703,
-      "MZ_intercept": -0.0015083009333757785,
-      "MZ_slope": 1.2705418690735624,
-      "MZ_F_p": 0.01877102666201757,
-      "PT_p": 0.03760770730965271,
-      "Brier": 0.24862694687289416,
-      "Brier_uncertainty": 0.24847412109375,
-      "Brier_resolution": 0.0023960169548981965,
-      "Brier_reliability": 0.004217512976208645,
+      "DirAcc": 0.4921875,
+      "AUC": 0.5868131868131868,
+      "MZ_intercept": 0.031748407274355905,
+      "MZ_slope": -0.17522208477606138,
+      "MZ_F_p": 0.0,
+      "PT_p": 1.0,
+      "Brier": 0.2501146573910483,
+      "Brier_uncertainty": 0.24993896484375,
+      "Brier_resolution": 0.0,
+      "Brier_reliability": 0.00018369750585614368,
       "Sharpe_strategy": NaN,
       "Strategy_best_threshold": 0.55,
-      "Conf_Coverage@90%": 0.828125,
-      "Conf_Width@90%": 0.012831375002861023
+      "Conf_Coverage@90%": 0.8125,
+      "Conf_Width@90%": 0.3763344883918762
     }
   ],
   "averages": {
-    "Conf_Width@90%": 0.06892249137163162,
-    "Brier_uncertainty": 0.2489013671875,
+    "AUC": 0.5755027020395816,
     "Strategy_best_threshold": 0.55,
-    "DirAcc": 0.51875,
-    "Brier_resolution": 0.005303384992097982,
-    "Brier": 0.24955160986134625,
-    "MZ_F_p": 0.0037542053324035136,
-    "Conf_Coverage@90%": 0.8265625,
-    "PT_p": 0.5805025692600375,
+    "PT_p": 0.6605192605817798,
+    "Brier_uncertainty": 0.24945068359375,
+    "Conf_Coverage@90%": 0.9078125,
+    "Brier_resolution": 0.0015207550077430453,
+    "DirAcc": 0.515625,
     "Sharpe_strategy": NaN,
-    "MZ_intercept": -0.00078910437686918,
-    "MZ_slope": 0.2951274999552752,
-    "Brier_reliability": 0.006118994560801844,
-    "AUC": 0.5511604590851263
+    "Brier_reliability": 0.0028254543483266694,
+    "Conf_Width@90%": 0.24347160905599594,
+    "Brier": 0.2501189464945372,
+    "MZ_slope": -0.01553967936057521,
+    "MZ_F_p": 0.0,
+    "MZ_intercept": 0.00657825600615491
   },
   "strategy_thresholds": {
     "0.5500": {
       "entries": [
         {
           "fold_id": 0,
-          "sharpe": NaN,
-          "turnover": 0.0,
-          "hit_rate": 0.0,
-          "active_fraction": 0.0
+          "sharpe": 8.192956530950795,
+          "turnover": 5.866667032241821,
+          "hit_rate": 0.09375,
+          "active_fraction": 0.1640625
         },
         {
           "fold_id": 1,
@@ -130,10 +130,10 @@
         },
         {
           "fold_id": 3,
-          "sharpe": 12.431297470033213,
-          "turnover": 26.56509778110402,
-          "hit_rate": 0.296875,
-          "active_fraction": 0.4921875
+          "sharpe": NaN,
+          "turnover": 0.0,
+          "hit_rate": 0.0,
+          "active_fraction": 0.0
         },
         {
           "fold_id": 4,
@@ -144,18 +144,18 @@
         }
       ],
       "mean_sharpe": NaN,
-      "mean_turnover": 5.313019556220803,
-      "mean_hit_rate": 0.059375,
-      "mean_active_fraction": 0.0984375
+      "mean_turnover": 1.1733334064483643,
+      "mean_hit_rate": 0.01875,
+      "mean_active_fraction": 0.0328125
     },
     "0.6000": {
       "entries": [
         {
           "fold_id": 0,
-          "sharpe": NaN,
-          "turnover": 0.0,
-          "hit_rate": 0.0,
-          "active_fraction": 0.0
+          "sharpe": 8.192956530950795,
+          "turnover": 5.866667032241821,
+          "hit_rate": 0.09375,
+          "active_fraction": 0.1640625
         },
         {
           "fold_id": 1,
@@ -173,10 +173,10 @@
         },
         {
           "fold_id": 3,
-          "sharpe": 12.431297470033213,
-          "turnover": 26.56509778110402,
-          "hit_rate": 0.296875,
-          "active_fraction": 0.4921875
+          "sharpe": NaN,
+          "turnover": 0.0,
+          "hit_rate": 0.0,
+          "active_fraction": 0.0
         },
         {
           "fold_id": 4,
@@ -187,9 +187,9 @@
         }
       ],
       "mean_sharpe": NaN,
-      "mean_turnover": 5.313019556220803,
-      "mean_hit_rate": 0.059375,
-      "mean_active_fraction": 0.0984375
+      "mean_turnover": 1.1733334064483643,
+      "mean_hit_rate": 0.01875,
+      "mean_active_fraction": 0.0328125
     }
   }
 }

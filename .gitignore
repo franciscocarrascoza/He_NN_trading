@@ -19,6 +19,30 @@ ui/desktop/build/
 *.o
 *.so
 
+# FIX: Ignore Optuna databases and logs
+*.db
+*.log
+optuna_runs/
+
+# FIX: Ignore reports and generated files
+reports/
+*.csv
+*.pkl
+
+# FIX: Ignore temporary files
+*.tmp
+*.bak
+~*
+
+# FIX: Ignore IDE files
+.vscode/
+.idea/
+*.swp
+
+# FIX: Ignore OS files
+.DS_Store
+Thumbs.db
+
 # FIX: Keep config and docs
 !config/
 !docs/
