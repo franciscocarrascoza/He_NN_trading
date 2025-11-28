@@ -1,0 +1,32 @@
+# STAGE 2 BEST CONFIG — Strategy Optimization
+# ⚠️ WARNING: Sharpe may be biased/overfit - validate before use
+# Model: Stage 1 Trial #632
+# Sharpe: 16.51 ± 0.00
+# Trial: 238 | Total trials: 500
+
+# Stage 1 Model (FIXED)
+model:
+  # Use parameters from Stage 1 trial #632
+  # See optuna_hermite_v6_stage1.db for full config
+
+# Stage 2 Strategy (OPTIMIZED)
+strategy:
+  threshold: 0.670000
+  confidence_margin: 0.200000
+  kelly_clip: 0.800000
+
+# Performance Metrics
+performance:
+  sharpe_mean: 16.5095
+  sharpe_std: 0.0000
+  sharpe_min: 16.5095
+  sharpe_max: 16.5095
+  valid_folds: 1
+  auc: 0.5925
+  dir_acc: 0.5266
+
+# Next Steps
+# 1. Run out-of-sample validation (MANDATORY)
+# 2. Check results on 2024-2025 data (if available)
+# 3. Verify no data leakage
+# 4. Paper trade for 30+ days before live deployment
